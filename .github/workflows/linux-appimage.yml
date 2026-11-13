@@ -1,0 +1,66 @@
+# The Linux AppImage (x86_64): ProjectReLink's builder with the compiler, Python, libraries and the Vulkan back end it
+# builds the game with on the player's PC (scripts/linux/deps.sh, scripts/linux/appimage.sh). No game data is involved.
+# Built in Ubuntu 22.04, the oldest system it is for (glibc 2.35). A workflow artifact on every run.
+name: Linux AppImage
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: linux-appimage-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  appimage:
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    timeout-minutes: 90
+    steps:
+      - name: System packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          for try in 1 2 3; do
+            if apt-get update &&
+              apt-get install -y --no-install-recommends software-properties-common gpg-agent &&
+              add-apt-repository -y ppa:ubuntu-toolchain-r/test &&
+              apt-get install -y --no-install-recommends g++-13 libstdc++-13-dev &&
+              apt-get install -y --no-install-recommends git ca-certificates curl xz-utils zstd file unzip python3 \
+              build-essential gcc-12 g++-12 libstdc++-12-dev nasm meson ninja-build cmake pkg-config \
+              libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxinerama-dev \
+              libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgles-dev libdrm-dev libgbm-dev \
+              libpulse-dev libasound2-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libxft-dev libfontconfig1-dev zlib1g-dev; then
+              break
+            else
+              package_status=$?
+            fi
+            if [ "$try" = 3 ]; then exit "$package_status"; fi
+            sleep 20
+          done
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/cache@v4
+        with:
+          path: build-linux/deps
+          key: linux-deps-${{ hashFiles('scripts/linux/deps.sh') }}
+
+      - name: Dependencies (LLVM, Python, FFmpeg with dav1d, SDL2, Vulkan headers)
+        run: scripts/linux/deps.sh
+
+      - name: AppImage
+        run: scripts/linux/appimage.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReLink-linux-x86_64
+          path: build-linux/*.AppImage
+          if-no-files-found: error
