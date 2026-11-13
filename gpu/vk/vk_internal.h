@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 #include <cstdlib>
-#include <intrin.h>
 
 #include "vk_loader.h"
 #include "vk_api.h"
