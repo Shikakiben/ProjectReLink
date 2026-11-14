@@ -247,6 +247,30 @@ uint64_t spare_bytes = 0;
 int64_t st_recycled = 0, st_fresh = 0;
 // (RX_VK_SPARE_MB=<MB>: how much of them is kept at most, 192 by default)
 const uint64_t kSpareBytes = (uint64_t)(getenv("RX_VK_SPARE_MB") ? std::max(16, atoi(getenv("RX_VK_SPARE_MB"))) : 192) << 20;
+// (relink, issues 6 and 7) What the system can still commit, and how far that is under the headroom the textures leave it
+// (RX_VK_COMMIT_FREE_MB, 2048 by default; 0: not looked at). Windows backs each VRAM allocation with commit, so a card with
+// a lot of VRAM can take the whole PC to its commit limit while the driver still allows more: the limit is RAM plus the
+// page file, which Windows grows slowly and refuses meanwhile. Asked every 30 frames. 0: enough left, or not known.
+// (Simulated here with RX_VK_COMMIT_FREE_MB=9000, hs2578: no spares, the textures held at 3 GB, the picture whole, 50-54 fps
+// for 54-57 on the same route)
+uint64_t commit_left_bytes = UINT64_MAX, commit_total_bytes = 0, ram_total_bytes = 0;
+uint64_t commit_short(uint64_t frame) {
+#ifdef _WIN32
+    static const uint64_t headroom = (uint64_t)(getenv("RX_VK_COMMIT_FREE_MB") ? std::max(0, atoi(getenv("RX_VK_COMMIT_FREE_MB"))) : 2048) << 20;
+    static uint64_t asked = UINT64_MAX;
+    if (asked == UINT64_MAX || frame - asked >= 30) {
+        asked = frame;
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof ms;
+        if (GlobalMemoryStatusEx(&ms))
+            commit_left_bytes = ms.ullAvailPageFile, commit_total_bytes = ms.ullTotalPageFile, ram_total_bytes = ms.ullTotalPhys;
+    }
+    return headroom && commit_left_bytes < headroom ? headroom - commit_left_bytes : 0;
+#else
+    (void)frame;
+    return 0;
+#endif
+}
 bool same_image(const VkImageCreateInfo& a, const VkImageCreateInfo& b) {
     return a.flags == b.flags && a.imageType == b.imageType && a.format == b.format && a.extent.width == b.extent.width &&
            a.extent.height == b.extent.height && a.extent.depth == b.extent.depth && a.mipLevels == b.mipLevels &&
@@ -1200,6 +1224,76 @@ uint32_t gpu_owned_since(uint64_t gpu, uint64_t n) {
     return covered >= n && since != UINT32_MAX ? std::max(since, 1u) : 0;
 }
 
+/// (relink, from upstream PR 2175) A big texture whose whole storage is zero: the image cleared to zero on the GPU, not unswizzled on
+/// the CPU. All-zero bits are 0 in every format this path takes (not ASTC or BC, not one widened on the way), so the clear is what
+/// the unswizzle would have made. The game's shadow map (12288 x 12288 D16, 288 MB, its storage fresh and zero) took 73 ms of the
+/// replay thread at a scene change; the check reads the storage once, on several threads, and stops at the first byte that is not 0.
+/// RX_VK_ZERO_UPLOAD=0: off
+bool upload_all_zero(Texture& tex, uint64_t total, const Ranges* dirty, bool widened_format) {
+    static const bool off = getenv("RX_VK_ZERO_UPLOAD") && atoi(getenv("RX_VK_ZERO_UPLOAD")) == 0;
+    if (off || total < (32ull << 20) || tex.astc || tex.bc || tex.sparse || widened_format || !tex.image ||
+        tex.type == VK_IMAGE_TYPE_3D || is_bc(tex.format) || is_astc(tex.format))
+        return false;
+    if (dirty) {   // (only an upload of the whole storage: a part of it says nothing of the rest)
+        uint64_t covered = 0;
+        for (const auto& r : *dirty) covered += std::min(r.second, total) - std::min(r.first, total);
+        if (covered < total) return false;
+    }
+    // (live memory, as the GPU unswizzle reads it: not a storage the capture kept as it was at its submit, which the CPU path reads)
+    if (tex.gpu >= (1ull << 40) || memory_has_shadow(tex.gpu, total)) return false;
+    uint64_t avail = 0;
+    const uint8_t* p = host->gpu_ptr(tex.gpu, &avail);
+    if (!p || avail < total) return false;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::atomic<bool> found{false};
+    const uint32_t nthreads = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 8u);
+    const uint64_t per = ((total / nthreads) + 4095) & ~4095ull;
+    auto part = [&](uint32_t t) {
+        const uint64_t a = std::min<uint64_t>(total, (uint64_t)t * per), b = std::min<uint64_t>(total, a + per);
+        for (uint64_t at = a; at < b && !found.load(std::memory_order_relaxed); at += 65536) {
+            const uint64_t end = std::min<uint64_t>(b, at + 65536);
+            uint64_t acc = 0;
+            uint64_t k = at;
+            for (; k + 8 <= end; k += 8) {
+                uint64_t w;
+                std::memcpy(&w, p + k, 8);
+                acc |= w;
+            }
+            for (; k < end; k++) acc |= p[k];
+            if (acc) found.store(true, std::memory_order_relaxed);
+        }
+    };
+    if (nthreads > 1) {
+        std::vector<std::thread> th;
+        for (uint32_t t = 1; t < nthreads; t++) th.emplace_back(part, t);
+        part(0);
+        for (auto& x : th) x.join();
+    } else {
+        part(0);
+    }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    static std::atomic<int> told{0};
+    if (found.load()) {
+        if (told.fetch_add(1) < 4)
+            logf("vk: upload: %ux%u NVN %#x (%llu MB) is not all zero (checked in %.1f ms): unswizzled as before", tex.width,
+                 tex.height, tex.nvn_format, (unsigned long long)(total >> 20), ms);
+        return false;
+    }
+    texture_resident_flush(&tex);
+    checkpoint_mark(upload_cmd(), tex.gpu, 'u');
+    const VkImageSubresourceRange range{tex.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+    if (tex.aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+        const VkClearDepthStencilValue z{0.0f, 0};
+        vkCmdClearDepthStencilImage(upload_cmd(), tex.image, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &range);
+    } else {
+        const VkClearColorValue z{};
+        vkCmdClearColorImage(upload_cmd(), tex.image, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &range);
+    }
+    if (told.fetch_add(1) < 4)
+        logf("vk: upload: %ux%u NVN %#x (%llu MB) is all zero: cleared on the GPU (checked in %.1f ms)", tex.width, tex.height,
+             tex.nvn_format, (unsigned long long)(total >> 20), ms);
+    return true;
+}
 bool upload(Texture& tex, const Ranges* dirty) {
     PROF(PROF_UPLOAD);
     if (!tex.gpu || tex.samples != VK_SAMPLE_COUNT_1_BIT) return false;
@@ -1231,6 +1325,7 @@ bool upload(Texture& tex, const Ranges* dirty) {
     const bool linear = nvn_tex_is_linear(&tex.d);
     int widen_from = 0;
     widened(tex.d.format ? vk_format(tex.nvn_format).format : tex.format, &widen_from);
+    if (upload_all_zero(tex, total, dirty, widen_from != 0)) return true;
     const int src_bpb = tex.bpb;
     const int out_bpb = tex.astc ? 4 : widen_from ? (widen_from == 3 ? 4 : widen_from == 6 ? 8 : 16) : src_bpb;
     const uint32_t copy_layers = tex.type == VK_IMAGE_TYPE_3D ? 1 : tex.layers;
@@ -3430,6 +3525,11 @@ void texture_frame(uint64_t completed) {
                 logf("vk: memory: working set %llu MB (peak %llu), private %llu MB, staging %llu MB in %zu arenas",
                      (unsigned long long)(pm.WorkingSetSize >> 20), (unsigned long long)(pm.PeakWorkingSetSize >> 20),
                      (unsigned long long)(pm.PrivateUsage >> 20), (unsigned long long)(kept >> 20), arenas.size());
+            // (relink, issues 6 and 7: what the PC has left, beside what the process holds)
+            if (const uint64_t s = commit_short(frame_no); commit_left_bytes != UINT64_MAX)
+                logf("vk: system memory: %llu MB of RAM, %llu MB left to commit of %llu MB%s", (unsigned long long)(ram_total_bytes >> 20),
+                     (unsigned long long)(commit_left_bytes >> 20), (unsigned long long)(commit_total_bytes >> 20),
+                     s ? " (short: textures and spare images are let go sooner)" : "");
 #if defined(__linux__) && defined(__GLIBC__)
             // (glibc's heap: what its arenas hold free. The shader translation and the loads' decoding leave their garbage spread through
             // the threads' arenas (26 of them, 1.2 GB resident in Kokiri Forest, the heap's growth in a scene change never going back),
@@ -3473,27 +3573,43 @@ void texture_frame(uint64_t completed) {
     // RX_VK_TIGHT_FREE=0: the cap always, as before
     static const bool tight_free = !getenv("RX_VK_TIGHT_FREE") || atoi(getenv("RX_VK_TIGHT_FREE")) != 0;
     uint64_t vu = 0, va = 0;
-    const bool tight = tight_free && (!dead.empty() || !spares.empty()) && vram_usage(&vu, &va, nullptr) && vu > va / 100 * 95;
-    const int per_frame = tight ? std::max(per_frame_cfg, 1024) : per_frame_cfg;
+    // (relink, issues 6 and 7) and when the system has little left to commit: Windows backs VRAM with commit (in a player's
+    // log the process's private bytes were 31.6 GB with 12.5 GB of a 16 GB card used, 20 GB here with 6 GB of VRAM), and the
+    // GPU there stopped finishing its work until Windows reset it
+    const bool tight = tight_free && (!dead.empty() || !spares.empty()) &&
+                       ((vram_usage(&vu, &va, nullptr) && vu > va / 100 * 95) || commit_short(frame_no) != 0);
+    // (relink, issues 6 and 7) the cap counts the images destroyed, not the ones kept as spares, and a spare is kept only while
+    // the spares are under kSpareBytes. Counted together, 24 dead textures a frame all became spares and left nothing of the cap
+    // for the spares' own trim, so with more than 24 a frame (the game's render targets move every frame when its step is not
+    // whole: Game speed at its default below 60 fps) the spares were never trimmed until VRAM reached 95% of what the driver
+    // allows: 1,794 spares of 3,010 MB against 192 in that log, with 12.5 GB of the 16 GB card used. And a backlog the cap
+    // cannot keep up with goes in about half a second, not never. RX_VK_SPARE_STRICT=0: as before
+    static const bool strict = !getenv("RX_VK_SPARE_STRICT") || atoi(getenv("RX_VK_SPARE_STRICT")) != 0;
+    int per_frame = tight ? std::max(per_frame_cfg, 1024) : per_frame_cfg;
+    if (strict && !tight && dead.size() > (size_t)per_frame * 8) per_frame = std::max(per_frame, (int)(dead.size() / 30));
     int destroyed = 0;
     for (auto it = dead.begin(); it != dead.end() && destroyed < per_frame;) {
         if (it->value > completed) {
             ++it;
             continue;
         }
-        destroyed++;
         for (VkImageView v : it->views) vkDestroyImageView(dev.device, v, nullptr);
-        if (!tight && recycle_on() && it->ci.sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO && it->image && it->memory.empty() && it->bytes <= kSpareBytes / 4) {
+        const bool spare = !tight && recycle_on() && it->ci.sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO && it->image && it->memory.empty() &&
+                           it->bytes <= kSpareBytes / 4 && (!strict || spare_bytes + it->bytes <= kSpareBytes);
+        if (spare) {
             spares.push_back({it->ci, it->image, it->allocation, frame_no, it->bytes});   // (relink: kept for the next of its kind)
             spare_bytes += it->bytes;
+            destroyed += strict ? 0 : 1;
         } else {
             destroy_image(it->image, it->allocation);
+            destroyed++;
         }
         if (it->buffer) destroy_buffer(it->buffer, it->buffer_alloc);
         for (VkDeviceMemory m : it->memory) vkFreeMemory(dev.device, m, nullptr);
         it = dead.erase(it);
     }
     // (relink) spare images: none kept over 300 frames, nor past kSpareBytes (the oldest go first)
+    if (strict) destroyed = 0;   // (their trim has the cap to itself)
     for (size_t i = 0; i < spares.size();) {
         if ((frame_no - spares[i].frame > 300 || spare_bytes > kSpareBytes || tight) && destroyed < per_frame) {
             destroyed++;
@@ -3536,6 +3652,7 @@ void texture_frame(uint64_t completed) {
         // Safety clamp: do not exceed 75% of driver-allowed memory on constrained VRAM (prevents VK_ERROR_DEVICE_LOST)
         budget = std::min(budget, (allowed / 4) * 3);
     }
+    const uint64_t size_budget = budget;   // (the budget as a size, before the rules below take an excess off it: evict_to)
     // (near what the driver allows, the budget shrinks by the excess. The excess of what the process holds less the
     // free space in VMA's blocks, which new images take before VMA makes a block: measured by the blocks alone, the
     // textures evicted freed space inside them that the driver still counted, so 10 frames later the budget shrank
@@ -3566,6 +3683,12 @@ void texture_frame(uint64_t completed) {
         squeezed = true;
         const uint64_t over = used - allowed / 100 * 97;
         budget = std::min(budget, total_bytes > over ? total_bytes - over : 0);
+    }
+    // (relink, issues 6 and 7) and by what the system has left to commit (commit_short above): the textures give back what
+    // its headroom is short of, but keep 3 GB: a PC whose page file is always short still has a cache to play with
+    if (const uint64_t s = commit_short(frame_no)) {
+        constexpr uint64_t kFloor = 3072ull << 20;
+        budget = std::min(budget, std::max(total_bytes > s ? total_bytes - s : 0, std::min(kFloor, budget)));
     }
     if (frame_no % 600 == 0) {
         vma_log_heaps();
@@ -3804,8 +3927,25 @@ void texture_frame(uint64_t completed) {
     const uint64_t need_unused = sweep ? std::max<uint64_t>(120, min_unused) : min_unused;
     const uint64_t need_dead = dead_targets ? std::min(need_unused, dead_min_unused) : need_unused;
     static uint64_t n_dead, b_dead, dead_logged_at;
+    // (relink, after upstream's pull request 2826) How far down a pass over the budget goes. A budget that is a size (the
+    // card's share, a preset's) asks for its 7/8, as before. The 90% rule's and the driver's limit's are not sizes: each is
+    // "what the textures hold, less the excess over a line", crossed again whenever anything grows. Cut to 7/8 of it, a few
+    // MB over the line took an eighth of the cache, textures on screen a second before, made again within the camera's
+    // turn and over the line again: in Castle Town Market entered after Hyrule Field on this 8 GB card (hs2070, 75 %) the
+    // cache went 3.0 -> 2.5 -> 3.0 GB every few seconds, 225 to 760 textures retired a pass. For those two what goes is
+    // the excess and 64 MB more, so that not every pass is one. MEASURED HERE (13/11, hs2110, Field then Market at 75 %,
+    // two pairs): no gain (Market 53.2 / 53.5 without, 51.7 / 45.9 with it and the mirrors' trim); the textures retired
+    // there are the dead transient targets of the sweep, not this rule's, and the Market alone runs the same as after the
+    // Field (hs2111). OPT-IN: RX_VK_EVICT_EXCESS=1
+    static const bool excess_only = getenv("RX_VK_EVICT_EXCESS") && atoi(getenv("RX_VK_EVICT_EXCESS")) != 0;
+    uint64_t evict_to = budget / 8 * 7;
+    if (excess_only) {
+        constexpr uint64_t kExcessSlack = 64ull << 20;
+        evict_to = total_bytes > size_budget ? size_budget / 8 * 7 : UINT64_MAX;
+        if (budget < size_budget && total_bytes > budget) evict_to = std::min(evict_to, budget - std::min(budget, kExcessSlack));
+    }
     for (auto& [last, tex] : order) {
-        if ((!sweep && total_bytes <= budget / 8 * 7) || frame_no - last < need_dead) break;
+        if ((!sweep && total_bytes <= evict_to) || frame_no - last < need_dead) break;
         const bool shifted = drawn_over_shifted(tex);
         if (frame_no - last < need_unused && !shifted) continue;   // (younger: only a dead transient target goes)
         if (tex->last_value > completed) continue;

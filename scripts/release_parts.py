@@ -21,6 +21,10 @@ and the play profile (addresses and counts made on the development PC).
         third_party part, the prebuilt files the repository does not carry (a64emit.dll, lld-link.exe, SDL2.dll, SDL3.dll,
         zbic.dll; rebuilt on the player's PC when their sources' stamps differ). Python, emsdk, CPM and wgpu-native are not
         in it: make_setup_parts.py --reuse takes their parts from the list.
+    python -I scripts/release_parts.py zip <setup list> <out zip> [--parts <folder>] [--add recomplauncher.json]
+        all the list's parts in one zip, as the setup lays them out (ReLink.exe at the top), with the --add files beside it:
+        the release's ProjectReLink-<tag>-Windows-x64.zip, which RecompLauncher installs. --parts: a folder that already holds
+        some of the parts (checked by size and SHA-256 like the rest)
 
 GitHub's API is read with $GH_TOKEN when it is set. Downloads are retried (GitHub answers 5xx now and then). Progress goes to
 stderr: what a command prints on stdout is its answer.
@@ -241,6 +245,41 @@ def llvm_mingw(a):
     return 0
 
 
+# SDL, for the controllers that are not Xbox pads (host/pad_sdl.c: Switch Pro, DualSense, DualShock 4 ...) and the
+# microphones: SDL2.dll (sdl2-compat, the SDL2 calls on SDL3) and the SDL3.dll it loads, beside the game (nx2/build.py copies
+# them from third_party/sdl2). The repository carries no binaries and the parts took them from the release before; the seed
+# this project's releases started from had none, so v0.6.1 shipped without them and a Switch Pro Controller did nothing in
+# the game (issue 3; the game's log said "no SDL beside the exe or on the system: only XInput controllers (Xbox pads) work").
+# Taken here from SDL's own releases, the versions third_party/sdl2/VERSION.txt names, by the size and SHA-256 GitHub
+# publishes for each archive: (file in the archive, SHA-256 of the archive, its size, its address)
+SDL = (
+    ("SDL3.dll", "368bed8b24e44ad9ea372990814f2343fcfb9e468abb7f8f4a3bc146c7304752", 1166032,
+     "https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-3.4.20-win32-x64.zip"),
+    ("SDL2.dll", "94a0184bc2d0670151a023656fb58e8f722fc001bda3a6a424234c88c5501cc0", 1273703,
+     "https://github.com/libsdl-org/sdl2-compat/releases/download/release-2.32.74/sdl2-compat-2.32.74-win32-x64.zip"),
+)
+
+
+def sdl_libraries(dest):
+    """SDL2.dll and SDL3.dll into dest (tools/third_party/sdl2) where they are not there already; how many were added"""
+    n = 0
+    for name, sha, size, url in SDL:
+        out = os.path.join(dest, name)
+        if os.path.isfile(out):   # (the release before had it: the third_party part's prebuilt files)
+            continue
+        with zipfile.ZipFile(fetch_part(sha, size, url)) as z:
+            member = next((m for m in z.namelist() if m.rsplit("/", 1)[-1] == name), None)
+            if not member:
+                sys.exit("%s: no %s in it" % (url, name))
+            data = z.read(member)
+        os.makedirs(dest, exist_ok=True)
+        with open(out, "wb") as f:
+            f.write(data)
+        print("%s (%d KB) from %s" % (name, len(data) >> 10, url.rsplit("/", 1)[-1]))
+        n += 1
+    return n
+
+
 def tracked(*paths):
     r = subprocess.run(["git", "ls-files", "-z", "--"] + list(paths), cwd=ROOT, check=True, stdout=subprocess.PIPE)
     return [f for f in r.stdout.decode("utf-8").split("\0") if f]
@@ -272,7 +311,56 @@ def package(a):
             print("%d prebuilt third_party files from %s" % (n, os.path.basename(tp)))
     else:
         print("no setup list: the package has no play profile and no prebuilt third_party files")
+    sdl_libraries(os.path.join(tools, "third_party", "sdl2"))
     print("package folder: %s" % out)
+    return 0
+
+
+def full_zip(a):
+    """Every part of a setup list in one zip, laid out as the setup installs them (its ReLink folder at the top of the zip), with
+    recomplauncher.json beside ReLink.exe: the release file RecompLauncher installs from"""
+    names, seen = [], set()
+    for w in part_lines(a.list):
+        if len(w) != 7:
+            sys.exit("%s: a part line that is not 'part <sha> <bytes> <folder> <top> <new name> <url>': %s" % (a.list, " ".join(w)))
+        sha, size, dest, top, new, url = w[1], int(w[2]), w[3], w[4], w[5], w[6]
+        local = os.path.join(a.parts, url.rsplit("/", 1)[-1]) if a.parts else ""
+        path = local if local and os.path.isfile(local) and os.path.getsize(local) == size and sha256(local) == sha \
+            else fetch_part(sha, size, url)
+        names.append((path, dest.strip("./"), top, new))
+    out = os.path.abspath(a.out)
+    with zipfile.ZipFile(out + ".new", "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        def add(name, src, length):
+            if name in seen:
+                sys.exit("%s is in two parts" % name)
+            seen.add(name)
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            info.file_size = length
+            with z.open(info, "w") as dst:
+                shutil.copyfileobj(src, dst, 1 << 20)
+        for path, dest, top, new in names:
+            with zipfile.ZipFile(path) as part:
+                for m in part.infolist():
+                    if m.is_dir():
+                        continue
+                    rel = m.filename
+                    if top != "-":
+                        if rel.split("/", 1)[0] != top:
+                            sys.exit("%s: %s is not under %s" % (path, rel, top))
+                        rel = new + rel[len(top):]
+                    rel = (dest + "/" + rel) if dest else rel
+                    if not rel.startswith("ReLink/") or ".." in rel.split("/"):
+                        sys.exit("%s: %s is not inside the ReLink folder" % (path, rel))
+                    with part.open(m) as src:
+                        add(rel[len("ReLink/"):], src, m.file_size)
+            print("%s: in" % os.path.basename(path), file=sys.stderr, flush=True)
+        for extra in a.add or []:
+            with open(extra, "rb") as src:
+                add(os.path.basename(extra), src, os.path.getsize(extra))
+    os.replace(out + ".new", out)
+    print("%s: %d files, %d MB" % (out, len(seen), os.path.getsize(out) >> 20))
     return 0
 
 
@@ -301,10 +389,16 @@ def main():
     s.add_argument("--publish", required=True)
     s.add_argument("--setup", required=True)
     s.add_argument("--list")
+    s = sub.add_parser("zip")
+    s.add_argument("list")
+    s.add_argument("out")
+    s.add_argument("--parts", help="a folder with the list's zips already there (the workflow's dist): not downloaded again")
+    s.add_argument("--add", action="append", help="a file put at the top of the zip (recomplauncher.json)")
     a = p.parse_args()
     if a.cmd == "previous":
         a.list_name = a.list_name or ["relink-setup.txt"]
-    return {"previous": previous, "adopt": adopt, "profile": profile, "llvm-mingw": llvm_mingw, "package": package}[a.cmd](a)
+    return {"previous": previous, "adopt": adopt, "profile": profile, "llvm-mingw": llvm_mingw, "package": package,
+            "zip": full_zip}[a.cmd](a)
 
 
 if __name__ == "__main__":

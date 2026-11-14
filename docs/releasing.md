@@ -14,6 +14,12 @@ release of their own, `builder-parts`. No game data is involved at any step.
 
 Players' launchers then offer the update: they compare the game folder's version with the latest release's tag.
 
+The release also gets `ProjectReLink-vX.Y.Z-Windows-x64.zip`: every part of `relink-setup.txt` in one zip, laid out as the
+setup installs them, with `recomplauncher.json` beside `ReLink.exe` (`scripts/release_parts.py zip`). RecompLauncher installs
+from it, runs `nx2/make_game.py --game <your copy> --out <its folder>\game --progress-lines` as its setup step and starts
+`game\bin\relink-game.exe`. Keep `recomplauncher.json` in step when a key of `relink_options.ini` changes; check it against
+https://recomplauncher.com/schema/recomplauncher.json.
+
 ## The seed: the first release, new tools, a new play profile
 
 The setup installs six parts. Three are made from this repository at every release: the launcher with the sources and the
@@ -21,6 +27,11 @@ play profile (`app`), .NET's runtime (`dotnet`) and `third_party`. llvm-mingw, t
 release. The other two are tools that change rarely and are not rebuilt in CI: Python with the build's modules (`python`)
 and the Vulkan headers with FFmpeg's libraries (`cpm`). Each release takes those two, and the play profile, from the
 release before it.
+
+SDL's two libraries (`SDL2.dll` and `SDL3.dll`, beside the game: the controllers that are not Xbox pads, the microphones)
+are not in the repository either. `scripts/release_parts.py package` puts them in the `third_party` part: from the release
+before when it had them, else from SDL's own releases (the versions `third_party/sdl2/VERSION.txt` names), checked by
+size and SHA-256. Version 0.6.1 was made before that and has none.
 
 A repository with no release yet has nothing to take them from, and a new play profile or a new Python has to come from
 somewhere too. That is the seed, made on the maintainer's PC by `scripts/make_seed.py` from three folders:
