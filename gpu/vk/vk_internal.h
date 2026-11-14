@@ -1,6 +1,7 @@
 // The Vulkan back end's shared state (gpu/vk).
 #pragma once
 
+#include <functional>
 #include <cstdint>
 #include <array>
 #include <atomic>
@@ -254,6 +255,8 @@ bool has_stencil(VkFormat f);
 bool vma_init(PFN_vkGetInstanceProcAddr gipa);
 bool create_image(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& allocation, bool dedicated = false);
 void destroy_image(VkImage image, VmaAllocation allocation);
+/// (relink) fn on the thread that destroys images, in order (vk_vma.cpp): a driver call the render thread need not wait for
+void reap(std::function<void()> fn);
 /// What an allocation really takes (VkMemoryRequirements.size: padding, alignment, the driver's metadata), 0 for none
 uint64_t allocation_size(VmaAllocation allocation);
 /// (dedicated: its own memory object, not a share of a 64 MB block: for the 16 to 32 MB ones that fit two to a block and leave

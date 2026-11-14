@@ -11,6 +11,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -250,7 +251,7 @@ void image_defrag_end(uint64_t* bytes_moved, uint64_t* bytes_freed, uint32_t* mo
 // destruction changes nothing but when its memory goes back. RX_VK_REAP=0: on the caller's thread, as before
 std::mutex reap_mu;
 std::condition_variable reap_cv;
-std::vector<std::pair<VkImage, VmaAllocation>> reap_queue;
+std::vector<std::function<void()>> reap_queue;   // (in order: a texture's views before its image)
 std::atomic<int64_t> reap_pending{0};
 void destroy_or_defer(VkImage image, VmaAllocation allocation) {
     std::lock_guard lk(defrag_mu);   // (held through the destruction: no defragmentation pass starts meanwhile)
@@ -265,14 +266,14 @@ bool reap_on() {
         const char* e = getenv("RX_VK_REAP");
         if (e && atoi(e) == 0) return false;
         std::thread([] {
-            std::vector<std::pair<VkImage, VmaAllocation>> batch;
+            std::vector<std::function<void()>> batch;
             for (;;) {
                 {
                     std::unique_lock lk(reap_mu);
                     reap_cv.wait(lk, [] { return !reap_queue.empty(); });
                     batch.swap(reap_queue);
                 }
-                for (auto& [img, a] : batch) destroy_or_defer(img, a), reap_pending--;
+                for (auto& fn : batch) fn(), reap_pending--;
                 batch.clear();
             }
         }).detach();
@@ -281,18 +282,21 @@ bool reap_on() {
     }();
     return on;
 }
+/// (relink) fn on the reaper (in the order given), or here with RX_VK_REAP=0: the other driver calls of a texture's end too (its
+/// views, a moved image's old one, a buffer), which the render thread made as it presented (texture_frame: 1 ms of each frame
+/// over 25 ms while the camera turned in the Market, hs2710, after the images themselves had gone to the reaper)
+void reap(std::function<void()> fn) {
+    if (!reap_on()) return fn();
+    {
+        std::lock_guard lk(reap_mu);
+        reap_queue.push_back(std::move(fn));
+    }
+    reap_pending++;
+    reap_cv.notify_one();
+}
 void destroy_image(VkImage image, VmaAllocation allocation) {
     if (!image && !allocation) return;
-    if (reap_on()) {
-        {
-            std::lock_guard lk(reap_mu);
-            reap_queue.push_back({image, allocation});
-        }
-        reap_pending++;
-        reap_cv.notify_one();
-        return;
-    }
-    destroy_or_defer(image, allocation);
+    reap([image, allocation] { destroy_or_defer(image, allocation); });
 }
 void destroy_image_now(VkImage image, VmaAllocation allocation) {
     if (allocation) {

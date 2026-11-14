@@ -5589,7 +5589,9 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     {
         PROF_HOT(PROF_PROGRAM);
         ParLock lk(d.mesh);   // (graphics programs: each thread's picks, program_pick's own lock)
+        program_load_async_here(true);   // (relink: a cached program's read goes to the workers: vk_shader.cpp)
         cp = program_for(s, d.mesh ? ProgramKind::Mesh : ProgramKind::Graphics, types);
+        program_load_async_here(false);
     }
     {   // (relink, a test) RX_VK_NO_MESH=1: task / mesh draws left out, to see what they draw; =2: the others left out
         static const int no_mesh = getenv("RX_VK_NO_MESH") ? atoi(getenv("RX_VK_NO_MESH")) : 0;
@@ -5716,6 +5718,20 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         if (may_skip) return void(st_pending_skips++);
         wait_for(cp->ready);
         if (left_out) return void(st_pending_skips++);
+    }
+    // (relink) a cached program's stand-in, its records now read (vk_shader.cpp): the pick again finds the variant read, or
+    // starts its translation as before
+    if (cp->failed && program_is_stand_in(cp)) {
+        {
+            ParLock lk(d.mesh);
+            cp = program_for(s, d.mesh ? ProgramKind::Mesh : ProgramKind::Graphics, types);
+        }
+        if (!cp) SKIP_HERE();
+        if (!cp->ready.load(std::memory_order_acquire)) {
+            if (may_skip) return void(st_pending_skips++);
+            wait_for(cp->ready);
+            if (left_out) return void(st_pending_skips++);
+        }
     }
     if (exposure_log_on() && cp) exposure_note(s, *cp);
     {   // (relink) RX_VK_TEX_OF=<program key,...>: what those programs' draws sample and draw into, 12 lines each at most

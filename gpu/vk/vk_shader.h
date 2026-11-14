@@ -88,6 +88,10 @@ std::string program_textures(const NvnState& s, const Program& p);   // (relink,
 std::string program_code_keys(const NvnState& s);   // (relink) " stage:key" for each of the bound program's codes
 const Program* program_pick(const NvnState& s, ProgramKind kind, const uint8_t color_types[8]);   // (program_for without its cache)
 void program_wait(const Program* p);
+/// (relink) draw() sets it around its pick: a pick there hands a cached program's read to the workers and gets a stand-in
+void program_load_async_here(bool on);
+/// (relink) a cached program's stand-in: once ready (and failed), its records are read and the draw picks again
+bool program_is_stand_in(const Program* p);
 uint64_t program_cache_stamp();   // (what the kept programs and pipelines are good for)
 size_t program_cache_load_some(const std::unordered_set<uint64_t>& wanted, const std::function<void(Program&)>& fn,
                                bool computes = true);   // (computes: and every kept compute program)

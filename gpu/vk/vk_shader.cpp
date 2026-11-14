@@ -1365,6 +1365,85 @@ void program_cache_load(uint64_t key, std::vector<std::unique_ptr<Program>>& var
     program_cache_read(disk_in, &disk_mu, key, recs, variants);
 }
 
+// (relink) Cached programs read off the replay threads. A program's first draw of a session read its records from
+// relink_programs.bin where it was drawn (ReadFile under shader_mu, then its shader modules made): as an area came in and
+// while the camera turned to things not drawn yet, the replay thread and its workers stopped for it and for each other
+// (sampled in the Market, hs2610: 11 ms of each frame over 45 ms, the workers waiting on shader_mu meanwhile; a PC with less
+// than 20 GB of RAM keeps only the compute programs from the start, so every graphics program goes this way once). A draw's
+// pick now hands the read to the background workers, each with its own handle on the file, side by side, and gets a
+// stand-in that is not ready: the draw waits for it as for a translation (where its targets already hold a picture,
+// RX_VK_PIPE_WAIT_MS a frame and then it is left out; elsewhere until it is read, on the waiting thread itself when no worker
+// has it yet) and picks again (vk_draw.cpp). Compute programs are read where they are dispatched, as before.
+// RX_VK_ASYNC_LOAD=0: every read where it is asked for, as before
+thread_local bool load_async_here = false;
+std::mutex stand_ins_mu;
+std::unordered_set<const Program*> stand_ins;
+std::vector<std::unique_ptr<Program>> stand_ins_done;   // (shader_mu: kept, a draw may still hold one)
+std::atomic<int64_t> st_async_loads{0}, st_async_ns{0}, st_async_variants{0};
+bool async_loads_on() {
+    static const bool on = !getenv("RX_VK_ASYNC_LOAD") || atoi(getenv("RX_VK_ASYNC_LOAD")) != 0;
+    return on;
+}
+FILE* own_cache_handle() {
+    static thread_local FILE* in = nullptr;
+    static thread_local bool tried = false;
+    if (!tried) {
+        tried = true;
+        if (!disk_path.empty()) in = fopen(disk_path.c_str(), "rb");
+    }
+    return in;
+}
+/// (shader_mu held) When key's records are still on disk: their read handed to a worker, and variants given the stand-in
+/// (mesh: a mesh program's, so that the mesh picks take it)
+bool program_cache_load_async(uint64_t key, std::vector<std::unique_ptr<Program>>& variants, bool mesh) {
+    if (!load_async_here || !async_loads_on()) return false;
+    disk_init();
+    if (!disk_on) return false;
+    auto recs = std::make_shared<std::vector<DiskRecord>>();
+    {
+        std::lock_guard lk(disk_mu);
+        auto it = disk_records.find(key);
+        if (it == disk_records.end()) return false;
+        *recs = std::move(it->second);
+        disk_records.erase(it);
+    }
+    auto stand_in = std::make_unique<Program>();
+    stand_in->key = key;
+    if (mesh) stand_in->mesh = dev.mesh_shader, stand_in->fallback = !dev.mesh_shader;
+    Program* raw = stand_in.get();
+    variants.push_back(std::move(stand_in));
+    {
+        std::lock_guard lk(stand_ins_mu);
+        stand_ins.insert(raw);
+    }
+    jobs_push(
+        [key, recs, raw] {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<std::unique_ptr<Program>> made;
+            if (FILE* in = own_cache_handle()) program_cache_read(in, nullptr, key, *recs, made);
+            else program_cache_read(disk_in, &disk_mu, key, *recs, made);
+            st_async_variants += (int64_t)made.size();
+            {
+                std::lock_guard lk(shader_mu);
+                auto& vs = programs[key];
+                auto at = std::find_if(vs.begin(), vs.end(), [raw](const std::unique_ptr<Program>& p) { return p.get() == raw; });
+                size_t pos = vs.size();
+                if (at != vs.end()) {   // (what was read takes the stand-in's place, in the order the file has it)
+                    pos = (size_t)(at - vs.begin());
+                    stand_ins_done.push_back(std::move(*at));
+                    vs.erase(at);
+                }
+                for (auto& p : made) vs.insert(vs.begin() + (ptrdiff_t)pos++, std::move(p));
+            }
+            raw->failed = true;   // (a stand-in: picked again once ready)
+            raw->ready.store(true, std::memory_order_release);
+            st_async_loads++;
+            st_async_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        },
+        true, &raw->ready);
+    return true;
+}
+
 void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* fsc, const Code* csc,
                     const uint8_t color_types[8]) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -1763,7 +1842,7 @@ const Program* mesh_program_locked(const NvnState& s, const uint8_t color_types[
     if (!mesh) return nullptr;
     const uint64_t key = mesh_key(task, *mesh, fsc, prim, color_types);
     auto& variants = programs[key];
-    program_cache_load(key, variants);
+    if (!program_cache_load_async(key, variants, true)) program_cache_load(key, variants);
     const uint64_t codes[4] = {mesh->key, fsc ? fsc->key : 0, task ? task->key : 0, prim ? prim->key : 0};
     for (auto& p : variants)
         if (!p->codes[0]) std::memcpy(p->codes, codes, sizeof codes);
@@ -1945,8 +2024,11 @@ const Program* program_for(const NvnState& s, ProgramKind kind, const uint8_t co
     const bool compute = kind == ProgramKind::Compute;
     static int64_t st_hit, st_none, st_differ, st_calls, st_by_tex;   // (logged now and then: how the cache does)
     if (++st_calls % 200000 == 0)
-        logf("vk: program picks: %lld kept (%lld by the last picks' textures, a uniform buffer bound since), %lld new, %lld with other textures (of %lld)",
-             (long long)st_hit, (long long)st_by_tex, (long long)st_none, (long long)st_differ, (long long)st_calls);
+        logf("vk: program picks: %lld kept (%lld by the last picks' textures, a uniform buffer bound since), %lld new, %lld with other textures (of %lld); "
+             "cached programs read by the workers: %lld (%lld variants, %.2f ms each)",
+             (long long)st_hit, (long long)st_by_tex, (long long)st_none, (long long)st_differ, (long long)st_calls,
+             (long long)st_async_loads.load(), (long long)st_async_variants.load(),
+             st_async_loads.load() ? st_async_ns.load() / 1e6 / (double)st_async_loads.load() : 0.0);
     const uint64_t stages = prog_stage_sig(s.prog);
     const uint64_t bind = s.bind_gen, reg = registrations_generation(), ub = ub_generation();
     // (relink) the pair of the last picks stood only while nothing at all was bound anew, and OoT binds a uniform buffer for nearly every
@@ -2023,7 +2105,7 @@ const Program* program_pick(const NvnState& s, ProgramKind kind, const uint8_t c
     // the variants of these stages, for these vertex input types and colour output types
     const uint64_t key = compute ? stage_code[5]->key : graphics_key(*stage_code[0], stage_code[1], s.vattr, color_types);
     auto& variants = programs[key];
-    program_cache_load(key, variants);
+    if (compute || !program_cache_load_async(key, variants, false)) program_cache_load(key, variants);
     const uint64_t codes[4] = {stage_code[compute ? 5 : 0]->key, !compute && stage_code[1] ? stage_code[1]->key : 0, 0, 0};
     for (auto& p : variants)
         if (!p->codes[0]) std::memcpy(p->codes, codes, sizeof codes);
@@ -2062,6 +2144,11 @@ const Program* program_pick(const NvnState& s, ProgramKind kind, const uint8_t c
 
 void program_wait(const Program* p) {
     if (p && !p->ready.load(std::memory_order_acquire)) jobs_wait(p->ready);
+}
+void program_load_async_here(bool on) { load_async_here = on; }
+bool program_is_stand_in(const Program* p) {
+    std::lock_guard lk(stand_ins_mu);
+    return stand_ins.count(p) != 0;
 }
 
 uint64_t program_cache_stamp() { return disk_stamp(); }

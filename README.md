@@ -138,6 +138,15 @@ over 25 ms went from 71 and 81 (two runs of 0.6.4) to 67, 50 and 66 (three runs 
 before and still do. It does not remove the longer stalls of a first visit, while the game loads an area and its
 shaders are read from disk.
 
+Version 0.6.6 goes on with it. A shader drawn for the first time in a session is read from the shader cache by background
+threads, several at once, instead of on the thread that draws the frame (on a PC with less than 20 GB of RAM that was every
+scene shader), and the rest of the driver's cleanup (texture views, images the video-memory reshuffle moved, freed
+buffers) left the render thread too. The same build with these changes off (`RX_VK_REAP=0`, `RX_VK_ASYNC_LOAD=0`) and on,
+the Market twice per run, three runs per side taken in turn: frames over 25 ms while the camera turns 59.5 on average
+against 47.0, the 99th percentile 38.1 ms against 32.6 (lower in all six pairs), the time lost in long frames at the
+first arrival 1,915 ms against 1,590. Against 0.6.5 itself, the background reads alone measured about 10 % less time lost
+at arrivals. The shaders are prepared again at the first start after this update, once.
+
 Not reached or not measured yet: a steady 60 everywhere (the Market stays below, and so do a few places at native
 resolution), boss fights, sessions longer than half an hour, and AMD and Intel cards.
 
@@ -252,6 +261,11 @@ La version 0.6.5 réduit les saccades quand la caméra tourne : les images des t
 un fil à part, et non plus sur celui qui dessine. Caméra qui tourne 20 s sur la place du marché, 60 images par seconde,
 75 % : de 71 et 81 images de plus de 25 ms (0.6.4) à 67, 50 et 66 (0.6.5). Les arrêts plus longs d'une première visite,
 pendant que le jeu charge un lieu, restent.
+
+La version 0.6.6 continue : un shader dessiné pour la première fois est lu par des fils en arrière-plan, et le reste du
+nettoyage du pilote a quitté le fil qui dessine. Le même build avec et sans, trois passages de chaque côté : 47 images de
+plus de 25 ms en tournant au lieu de 59,5 en moyenne, et 17 % de temps perdu en moins à l'arrivée sur la place du
+marché. Le premier démarrage après cette mise à jour prépare les shaders une nouvelle fois.
 
 ### Licence
 

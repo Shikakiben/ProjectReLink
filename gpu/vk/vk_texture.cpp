@@ -3455,8 +3455,10 @@ void texture_defrag_step() {
 // (texture_frame: once the GPU passed the present after a pass's copies, the old images go and the pass ends)
 void defrag_frame(uint64_t completed) {
     for (int i = 0; i < 12 && !defrag_trash.empty(); i++) {   // (a pass moves 24 at most, every 2-3 presents)
-        for (VkImageView v : defrag_trash.back().views) vkDestroyImageView(dev.device, v, nullptr);
-        vkDestroyImage(dev.device, defrag_trash.back().image, nullptr);
+        reap([o = std::move(defrag_trash.back())] {   // (relink: on the reaper, vk_vma.cpp)
+            for (VkImageView v : o.views) vkDestroyImageView(dev.device, v, nullptr);
+            vkDestroyImage(dev.device, o.image, nullptr);
+        });
         defrag_trash.pop_back();
     }
     if (!defrag_pending) return;
@@ -3593,7 +3595,8 @@ void texture_frame(uint64_t completed) {
             ++it;
             continue;
         }
-        for (VkImageView v : it->views) vkDestroyImageView(dev.device, v, nullptr);
+        if (!it->views.empty())   // (relink: on the reaper, before the image's own end: vk_vma.cpp)
+            reap([views = std::move(it->views)] { for (VkImageView v : views) vkDestroyImageView(dev.device, v, nullptr); });
         const bool spare = !tight && recycle_on() && it->ci.sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO && it->image && it->memory.empty() &&
                            it->bytes <= kSpareBytes / 4 && (!strict || spare_bytes + it->bytes <= kSpareBytes);
         if (spare) {
@@ -3604,8 +3607,8 @@ void texture_frame(uint64_t completed) {
             destroy_image(it->image, it->allocation);
             destroyed++;
         }
-        if (it->buffer) destroy_buffer(it->buffer, it->buffer_alloc);
-        for (VkDeviceMemory m : it->memory) vkFreeMemory(dev.device, m, nullptr);
+        if (it->buffer) reap([b = it->buffer, a = it->buffer_alloc] { destroy_buffer(b, a); });
+        if (!it->memory.empty()) reap([m = std::move(it->memory)] { for (VkDeviceMemory x : m) vkFreeMemory(dev.device, x, nullptr); });
         it = dead.erase(it);
     }
     // (relink) spare images: none kept over 300 frames, nor past kSpareBytes (the oldest go first)
