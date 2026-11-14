@@ -3,7 +3,7 @@
 # Called by AppRun when it is given no argument; any argument goes to make_game.py as it is (the command line).
 # zenity draws it: a desktop without zenity gets the command line's usage instead.
 set -u
-HERE=$(dirname "$(readlink -f "$0")")
+HERE="${RELINK_APPDIR:-$(dirname "$(readlink -f "$0")")/../../../../..}"   # (the AppRun exports it; run by hand, five levels up)
 PY="$HERE/usr/python/bin/python3"
 MK="$HERE/usr/share/relink/nx2/make_game.py"
 

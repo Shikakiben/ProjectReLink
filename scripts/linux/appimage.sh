@@ -96,6 +96,7 @@ export RELINK_FFMPEG="$HERE/usr/lib/relink/ffmpeg"
 export RELINK_SDL2="$HERE/usr/lib/relink/libSDL2-2.0.so.0"
 export RELINK_VK_PREBUILT="$HERE/usr/lib/relink/relink_vk.so"
 export PATH="$EMSDK/upstream/bin:$PATH"
+export RELINK_APPDIR="$HERE"
 # (no argument: the window, scripts/linux/gui.sh; any argument: make_game.py as it is)
 if [ $# -eq 0 ]; then
     exec "$HERE/usr/share/relink/scripts/linux/gui.sh"
