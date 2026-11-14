@@ -91,6 +91,7 @@ HERE=$(dirname "$(readlink -f "$0")")
 export EMSDK="$HERE/usr/lib/relink/emsdk"
 export RELINK_SYSROOT="$HERE/usr/lib/relink/sysroot"
 export RX_CPM="$HERE/usr/share/relink/cpm"
+export RELINK_FFMPEG="$HERE/usr/lib/relink/ffmpeg"
 export RELINK_SDL2="$HERE/usr/lib/relink/libSDL2-2.0.so.0"
 export RELINK_VK_PREBUILT="$HERE/usr/lib/relink/relink_vk.so"
 export PATH="$EMSDK/upstream/bin:$PATH"
