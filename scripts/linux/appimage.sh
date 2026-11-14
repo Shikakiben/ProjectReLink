@@ -41,7 +41,7 @@ L=$APPDIR/usr/lib/relink
 cp -a nx2 host gpu third_party tools scripts LICENSE README.md "$T/"
 printf '%s\n' "$VERSION" > "$T/VERSION"
 find "$T" -name __pycache__ -prune -exec rm -rf {} +
-chmod +x "$T/scripts/linux/gui.sh" 2>/dev/null || true
+chmod +x "$T/scripts/linux/gui.py" 2>/dev/null || true
 rm -f "$T/third_party/a64-kit/tools/lld-link.exe"
 
 # ---- what it builds with ----
@@ -97,9 +97,9 @@ export RELINK_SDL2="$HERE/usr/lib/relink/libSDL2-2.0.so.0"
 export RELINK_VK_PREBUILT="$HERE/usr/lib/relink/relink_vk.so"
 export PATH="$EMSDK/upstream/bin:$PATH"
 export RELINK_APPDIR="$HERE"
-# (no argument: the window, scripts/linux/gui.sh; any argument: make_game.py as it is)
+# (no argument: the window, scripts/linux/gui.py; any argument: make_game.py as it is)
 if [ $# -eq 0 ]; then
-    exec "$HERE/usr/share/relink/scripts/linux/gui.sh"
+    exec "$HERE/usr/python/bin/python3" -I "$HERE/usr/share/relink/scripts/linux/gui.py"
 fi
 exec "$HERE/usr/python/bin/python3" -I "$HERE/usr/share/relink/nx2/make_game.py" "$@"
 AEOF
