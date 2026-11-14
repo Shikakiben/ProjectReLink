@@ -52,9 +52,17 @@ jobs:
       - name: Version
         id: version
         run: |
-          tag=$(git describe --tags --always --match 'v[0-9]*' 2>/dev/null || echo "dev-${GITHUB_SHA::7}")
+          # The release this fork is on: the newest upstream tag that is a plain vX.Y.Z. git describe cannot say it
+          # here: this workflow's own releases are tags too, and describe would pick the newest of those, so each
+          # release would be named after the one before. The commits on top of it (our Linux work) are counted and
+          # become the suffix, so v0.6.5-linux.12 says 12 commits past upstream's v0.6.5.
+          base=$(git tag --merged HEAD --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          base=${base:-v0}
+          count=$(git rev-list --count "$base"..HEAD 2>/dev/null || echo 0)
+          tag="$base"
+          [ "$count" != "0" ] && tag="$base-linux.$count"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "the AppImage is $tag"
+          echo "the AppImage is $tag ($count commits past $base)"
 
       - uses: actions/cache@v4
         with:
