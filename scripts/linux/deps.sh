@@ -1,12 +1,12 @@
 #!/bin/bash
 # What the Linux AppImage carries, fetched and built into build-linux/deps (or $DEPS): each part once, kept while its
 # version stays the same. Run on the oldest system the AppImage is for (CI: Ubuntu 22.04, glibc 2.35).
-# (ProjectReLink: no Tk, the builder is the command line; the tools need numpy, capstone, unicorn and zstandard)
+# (ProjectReLink: no Tk, the builder is the command line; the tools need lz4, numpy, capstone, unicorn and zstandard)
 #
 #   emsdk/upstream/   LLVM's clang and lld (the layout third_party/a64-kit/tools/toolchain.py finds through EMSDK):
 #                     the player's PC compiles the game with them. The play profile (work/relink_pieces.prof) wants
 #                     LLVM 23 or newer.
-#   python/           CPython (python-build-standalone) with numpy, capstone, unicorn and zstandard: the tools
+#   python/           CPython (python-build-standalone) with lz4, numpy, capstone, unicorn and zstandard: the tools
 #   ffmpeg/           FFmpeg's libavcodec, libswscale, libswresample, libavutil, static and LGPL, with dav1d for OoT's
 #                     AV1 movies (VP8 / VP9 too) - linked into the game
 #   sdl2/             libSDL2-2.0.so.0: the window, sound and controllers, placed beside the game
@@ -89,13 +89,13 @@ if ! done_for llvm "$LLVM_VER"; then
 fi
 
 # ---- Python and the tools' modules ----
-PY_MARK="$PY_VER-$PY_TAG"
+PY_MARK="$PY_VER-$PY_TAG-lz4-numpy-capstone-unicorn-zstandard"   # (a new module list installs again)
 if ! done_for python "$PY_MARK"; then
     fetch "https://github.com/astral-sh/python-build-standalone/releases/download/$PY_TAG/cpython-$PY_VER+$PY_TAG-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz" python.tar.gz "$PY_SHA256"
     rm -rf "$DEPS/python"
     tar -xzf "$DL/python.tar.gz" -C "$DEPS"
     "$DEPS/python/bin/python3" -m pip install --no-cache-dir --only-binary :all: --disable-pip-version-check -q \
-        "numpy==2.5.4" "capstone==5.0.9" "unicorn==2.1.4" "zstandard==0.25.0"
+        "lz4==4.4.5" "numpy==2.5.4" "capstone==5.0.9" "unicorn==2.1.4" "zstandard==0.25.0"
     rm -rf "$DEPS/python/lib/python3.12/test" "$DEPS/python/lib/python3.12/idlelib" "$DEPS/python/lib/python3.12/ensurepip"
     find "$DEPS/python" -name __pycache__ -prune -exec rm -rf {} +
     mark python "$PY_MARK"
