@@ -102,10 +102,16 @@ static int64_t next_frame_at, window_start, frames_in_window;
 static int display_hz(void) {
     static int hz;
     if (!hz) {
+#ifdef _WIN32
         DEVMODEA dm;
         memset(&dm, 0, sizeof dm);
         dm.dmSize = sizeof dm;
         hz = EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1 ? (int)dm.dmDisplayFrequency : 60;
+#else
+        /* (linux) SDL's desktop mode carries the refresh rate, but this build asks it through host/hos_sdl.c's
+           dlopen'd library and has no call for it yet: 60, the game's own rate, unless HOS_FPS_MAX says more */
+        hz = 60;
+#endif
         hz = hz < 60 ? 60 : hz > 240 ? 240 : hz;
     }
     return hz;
