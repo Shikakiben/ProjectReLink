@@ -73,21 +73,25 @@ Language: $lang
 
 It takes 10 to 45 minutes. The window shows the progress." || exit 0
 
-args=(--out "$out" --language "$lang")
+log="$out/build.log"
+args=(--out "$out" --language "$lang" --log "$log")
 if [ -n "$nup" ]; then args+=(--nup "$nup"); else args+=(--romfs "$romfs" --exefs "$exefs"); fi
 
-log="$out/build.log"
 mkdir -p "$out" 2>/dev/null
 (
+    stage="starting"; file=""; eta=""
     "$PY" -I "$MK" "${args[@]}" 2>&1 | while IFS= read -r line; do
         case "$line" in
-            @@progress\ *) echo "${line#@@progress }" ;;
-            @@stage\ *)    echo "# ${line#@@stage }" ;;
+            @@stage\ *)    stage="${line#@@stage }"; stage="${stage#* }"; echo "# $stage" ;;
+            @@file\ *)     file="${line#@@file }"; file="${file%% *}"; echo "# $stage — $file" ;;
+            @@eta\ *)      eta="${line#@@eta }"
+                           if [ -n "$file" ]; then echo "# $stage — $file — about ${eta}s left"
+                           else echo "# $stage — about ${eta}s left"; fi ;;
+            @@progress\ *) awk -v p="${line#@@progress }" 'BEGIN { printf "%d\n", p * 100 }' ;;
             @@error\ *)    echo "# ${line#@@error }" ;;
-            @@eta\ *)      echo "# about ${line#@@eta } s left" ;;
         esac
     done
-) | zenity --progress --title="ReLink — building the game" --width=600 --auto-close --no-cancel \
+) | zenity --progress --title="ReLink — building the game" --width=640 --auto-close --no-cancel \
         --text="Building the game from your own copy…" 2>/dev/null
 
 # ---- 5. what happened ----
@@ -99,6 +103,10 @@ Play it now?"; then
         cd "$out" && exec ./relink
     fi
 else
-    say "The build did not finish. Its log is in
-$out/build.log"
+    if [ -f "$log" ]; then
+        zenity --text-info --title="ReLink — the build did not finish" --width=900 --height=600 \
+            --filename="$log" --text="The build did not finish. Its log:" 2>/dev/null
+    else
+        say "The build did not finish, and it wrote no log."
+    fi
 fi
