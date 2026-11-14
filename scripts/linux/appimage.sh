@@ -38,9 +38,10 @@ T=$APPDIR/usr/share/relink
 L=$APPDIR/usr/lib/relink
 
 # ---- the tools (the sources the player's build compiles, and the scripts) ----
-cp -a nx2 host gpu third_party tools LICENSE README.md "$T/"
+cp -a nx2 host gpu third_party tools scripts LICENSE README.md "$T/"
 printf '%s\n' "$VERSION" > "$T/VERSION"
 find "$T" -name __pycache__ -prune -exec rm -rf {} +
+chmod +x "$T/scripts/linux/gui.sh" 2>/dev/null || true
 rm -f "$T/third_party/a64-kit/tools/lld-link.exe"
 
 # ---- what it builds with ----
@@ -95,6 +96,10 @@ export RELINK_FFMPEG="$HERE/usr/lib/relink/ffmpeg"
 export RELINK_SDL2="$HERE/usr/lib/relink/libSDL2-2.0.so.0"
 export RELINK_VK_PREBUILT="$HERE/usr/lib/relink/relink_vk.so"
 export PATH="$EMSDK/upstream/bin:$PATH"
+# (no argument: the window, scripts/linux/gui.sh; any argument: make_game.py as it is)
+if [ $# -eq 0 ]; then
+    exec "$HERE/usr/share/relink/scripts/linux/gui.sh"
+fi
 exec "$HERE/usr/python/bin/python3" -I "$HERE/usr/share/relink/nx2/make_game.py" "$@"
 AEOF
 chmod +x "$APPDIR/AppRun"
@@ -106,7 +111,7 @@ Comment=Build The Legend of Zelda: Ocarina of Time (Switch 2) from your own copy
 Exec=AppRun
 Icon=relink
 Categories=Game;
-Terminal=true
+Terminal=false
 DEOF
 cp assets/relink.png "$APPDIR/relink.png"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
