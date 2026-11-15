@@ -124,6 +124,22 @@ def no_throttle(handle=None):
     except (OSError, ValueError, TypeError):
         pass
 
+
+def below_normal(handle):
+    """(relink, issue 6) A compiler process at below normal priority, only with RELINK_LOW_PRIORITY=1: the PC stays more
+    responsive while the game compiles, and the build can take longer. Off by default: on an Intel CPU with efficiency cores,
+    Windows kept the below-normal compilers on those cores with most performance cores idle, and the compile used far more
+    of the CPU once they were set to normal. make_game.py runs at normal priority itself, so the compilers start at normal"""
+    if os.name != "nt" or not handle or os.environ.get("RELINK_LOW_PRIORITY", "0") in ("", "0"):
+        return
+    import ctypes
+    k = ctypes.WinDLL("kernel32")
+    k.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    try:
+        k.SetPriorityClass(ctypes.c_void_p(int(handle)), 0x4000)   # (BELOW_NORMAL_PRIORITY_CLASS)
+    except (OSError, ValueError, TypeError):
+        pass
+
 def HOT_ORDER():
     p = os.path.join(kit.WORK, "hot_order.txt")
     if not os.path.exists(p) or os.environ.get("RX_NO_ORDER"):
@@ -621,6 +637,7 @@ def compile_one(job):
     try:
         with subprocess.Popen([cc] + fl + ["-c", src, "-o", obj], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as p:
             no_throttle(getattr(p, "_handle", None))
+            below_normal(getattr(p, "_handle", None))
             if GATE:
                 GATE.started(lease, p)
             out, err = p.communicate()
@@ -980,6 +997,15 @@ def main():
         if os.path.exists(sdl3) and (not os.path.exists(sdl3_dst) or os.path.getsize(sdl3_dst) != os.path.getsize(sdl3)):
             import shutil
             shutil.copyfile(sdl3, sdl3_dst)
+        # (relink, 0.7) AMD's FSR library and its license beside it: gpu/vk's FSR choice loads it from there
+        # (scripts/release_parts.py takes them from AMD's FidelityFX SDK into third_party/ffx)
+        for name in ("amd_fidelityfx_vk.dll", "LICENSE-FidelityFX.txt", "vcrt/msvcp140.dll", "vcrt/vcruntime140.dll", "vcrt/vcruntime140_1.dll"):
+            src = os.path.join(kit.HERE, "..", "third_party", "ffx", name)
+            dst = os.path.join(out, name)
+            if os.path.exists(src) and (not os.path.exists(dst) or os.path.getsize(dst) != os.path.getsize(src)):
+                import shutil
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copyfile(src, dst)
     if vk_prebuilt and a.standalone and not a.only:
         import shutil
         shutil.copyfile(vk_prebuilt, os.path.join(out, VK_LIB))

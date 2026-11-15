@@ -1,5 +1,6 @@
-// NVIDIA DLSS Super Resolution in place of OoT's gameplay upscale network (vk_dlss.cpp). Built in only with NVIDIA's NGX
-// SDK (RELINK_NGX, scripts/ngx_sdk.py: Linux and Windows); without it these say DLSS is not there and the game's network runs.
+// NVIDIA DLSS Super Resolution, or (relink) AMD FSR 3.1, in place of OoT's gameplay upscale network (vk_dlss.cpp). DLSS is
+// built in only with NVIDIA's NGX SDK (RELINK_NGX, scripts/ngx_sdk.py: Linux and Windows); without it these say DLSS is not
+// there. FSR is in every build, where AMD's runtime loads (vk_fsr.h). The names say dlss for either.
 #pragma once
 
 #include <vector>
@@ -18,11 +19,12 @@ DlssWhy dlss_why();
 /// Asks NGX once whether DLSS runs on this device, so dlss_why knows before the first upscale (the menu, when it opens).
 /// Nothing off an NVIDIA device with NGX's extensions, or in a build without DLSS
 void dlss_probe();
-/// What is asked for: 0 off, 1 DLSS (in place of the game's gameplay upscale, at any render share), 2 DLAA (anti-aliasing at the render size, the 3D at full scale):
-/// the Insert menu's Upscaler row (opts.dlss), or RX_VK_DLSS=0 / 1 / 2 over it. 0 when dlss_why() says it cannot run
+/// What is asked for: 0 off, 1 DLSS (in place of the game's gameplay upscale, at any render share), 2 DLAA (anti-aliasing at the render size, the 3D at full scale),
+/// 3 AMD FSR (as DLSS), 4 AMD FSR native AA (as DLAA): the Insert menu's Upscaler row (opts.dlss), or RX_VK_DLSS=0 to 4 over
+/// it. 0 when dlss_why() (DLSS, DLAA) or fsr_why() (FSR) says it cannot run
 int dlss_mode();
 bool dlss_wanted();   // (dlss_mode() != 0)
-/// DLAA: the 3D drawn at full scale, whatever the Render resolution row says (rx_option 2 and 3)
+/// DLAA or FSR native AA: the 3D drawn at full scale, whatever the Render resolution row says (rx_option 2 and 3)
 bool dlss_full_scale();
 /// The instance's extensions DLSS needs, added to `want` when the loader has them (all: what it has)
 void dlss_instance_extensions(std::vector<const char*>& want, const std::vector<VkExtensionProperties>& all);
@@ -63,13 +65,13 @@ bool dlss_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, Vk
 /// deferred frees are let go, so its video memory comes back. Nothing to do costs one atomic load
 void dlss_idle();
 
-/// For the renderer's status line (vk_replay.cpp status_tick): while DLSS or DLAA draws, its details since the last call
-/// into b ("; DLSS: jitter ..., actor motion ..., its images ... MB") and 1 (DLSS) or 2 (DLAA); else 0 and b left alone
+/// For the renderer's status line (vk_replay.cpp status_tick): while an upscaler draws, its details since the last call
+/// into b ("; DLSS: jitter ..., actor motion ..., its images ... MB") and its dlss_mode() (1 to 4); else 0 and b left alone
 int dlss_status(char* b, size_t n);
 
 /// The scene's width (axis 0) or height (1) for the host's camera jitter (nx2/oot_jitter.py, HOS_OPT_DLSS_JITTER_W and _H): 0 when
-/// there is to be none (DLSS not drawing, or RX_VK_DLSS_JITTER=0). Axis 2: the jitter sequence's length for DLSS's scale
-/// (dlss_jitter_phases, HOS_OPT_DLSS_JITTER_PHASES)
+/// there is to be none (DLSS or FSR not drawing, or RX_VK_DLSS_JITTER=0). Axis 2: the jitter sequence's length for DLSS's
+/// scale (dlss_jitter_phases, HOS_OPT_DLSS_JITTER_PHASES), or FSR's (FFX's own count)
 uint32_t dlss_jitter_size(int axis);
 
 } // namespace mkwvk

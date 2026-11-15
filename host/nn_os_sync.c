@@ -198,7 +198,7 @@ static Obj *obj(uint64_t key, int kind) {
 }
 /* obj without the checkpoint, for lookups under a host lock: a checkpoint there can give the core up and wait for one
    while the lock is held, and a thread that holds a core can then block on that lock (wait_any's scan under mw_lock vs
-   poke_multiwait: a stall until the vcore escape). As upstream's; brought here on 12/11 with the escape fix (hos_thread.c
+   poke_multiwait: a stall until the vcore escape). Brought here on 12/11 with the escape fix (hos_thread.c
    hos_vcore_away), which needs it: with threads taking a core again after an escape, OoT's audio thread stood in
    event_signal behind mw_lock 77 % of the time, holding its core (hs1511), and the game started at 0.3 frames a second. */
 static Obj *obj_nockpt(uint64_t key, int kind) {

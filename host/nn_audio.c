@@ -599,7 +599,7 @@ static void au_device_name(unsigned device, char *out, size_t size) {
 #endif
 }
 static uint64_t au_ms(void) { return (uint64_t)GetTickCount64(); }
-/* (relink, upstream 4a0bf35f) Which output Windows has as its default now (the waveOut mapper's preferred device, its number and name):
+/* (relink) Which output Windows has as its default now (the waveOut mapper's preferred device, its number and name):
    a key that changes when the default does; 0 when unknown. A device opened as the default stays on that device when
    Windows moves its default (a Bluetooth headset gone and back), so the output section asks every second */
 #ifndef DRVM_MAPPER_PREFERRED_GET
@@ -660,7 +660,7 @@ static int au_device_channels(void) {
 #else
 static int au_device_channels(void) { return hos_sdl_audio_channels(); }
 #endif
-/* (relink, upstream 48562589) The Insert menu's Audio output (gpu/vk/vk_menu.cpp): audio_output= in relink_options.ini beside the game,
+/* (relink) The Insert menu's Audio output (gpu/vk/vk_menu.cpp): audio_output= in relink_options.ini beside the game,
    0 Auto, 1 Stereo, 2 5.1 (a number past them is the nearest, as the menu reads it). Read from the file, as
    host/nn_applet.c reads the Handheld profile: the game asks for its speakers only once, at its start */
 static int au_menu_output(void) {
@@ -754,7 +754,7 @@ static void output_error(const char *operation, MMRESULT result) {
 static int out_next;           /* the next candidate: 0 = HOS_AUDIO_DEVICE, 1 = the default, 2.. = device n-2 */
 static uint64_t out_opened, out_stall_since;
 static unsigned out_played, out_peak, out_reported;
-/* (relink, upstream 4a0bf35f) A device gone (a Bluetooth headset off, the audio service restarted: "no driver", "invalid handle" from the
+/* (relink) A device gone (a Bluetooth headset off, the audio service restarted: "no driver", "invalid handle" from the
    next call) is closed and the default opened again; none opening, the default is tried every second until one does.
    Opened as the default, the output follows Windows': its key (au_default_key) looked at every second, a change reopens
    there. Before, a call that failed this way was only logged, the same block tried again for good, and the game had no

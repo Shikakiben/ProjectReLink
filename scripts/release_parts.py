@@ -30,10 +30,12 @@ GitHub's API is read with $GH_TOKEN when it is set. Downloads are retried (GitHu
 stderr: what a command prints on stdout is its answer.
 """
 import argparse
+import glob
 import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -280,6 +282,66 @@ def sdl_libraries(dest):
     return n
 
 
+# (relink, 0.7) AMD FidelityFX Super Resolution 3.1 (gpu/vk/vk_dlss.cpp's FSR choice): AMD's prebuilt, signed Vulkan library from
+# the FidelityFX SDK v1.1.4 (MIT), with its license, beside the game (nx2/build.py copies them from third_party/ffx). Taken here
+# from AMD's own repository by size and SHA-256, as the SDL files above: (file, SHA-256, size, address)
+FFX = (
+    ("amd_fidelityfx_vk.dll", "a1624cc4238fef046f30c4d80ce3f47be63fc5f5373f49e3ee9edb9960f54c78", 9332432,
+     "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v1.1.4/PrebuiltSignedDLL/amd_fidelityfx_vk.dll"),
+    ("LICENSE-FidelityFX.txt", "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a", 1115,
+     "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v1.1.4/LICENSE.txt"),
+)
+
+
+def ffx_library(dest):
+    """AMD's FSR library and its license into dest (tools/third_party/ffx) where they are not there already; how many were added"""
+    n = 0
+    for name, sha, size, url in FFX:
+        out = os.path.join(dest, name)
+        if os.path.isfile(out) and os.path.getsize(out) == size and sha256(out) == sha:
+            continue
+        os.makedirs(dest, exist_ok=True)
+        shutil.copyfile(fetch_part(sha, size, url), out)
+        print("%s (%d KB) from AMD's FidelityFX SDK v1.1.4" % (name, size >> 10))
+        n += 1
+    return n
+
+
+def vc_runtime(dest):
+    """Microsoft's Visual C++ 2015-2022 runtime (msvcp140, vcruntime140, vcruntime140_1), which AMD's FSR library imports, into
+    dest (tools/third_party/ffx/vcrt) from the newest Visual Studio's Redist folder on this machine (the CI runner has one):
+    the files Microsoft provides for an application to carry beside itself. The game takes them only on a PC without the
+    runtime (gpu/vk/vk_fsr.cpp). How many were added; none, said, where no Visual Studio is found"""
+    if os.name != "nt":
+        return 0
+    names = ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+    vswhere = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Microsoft Visual Studio", "Installer", "vswhere.exe")
+    roots = []
+    if os.path.isfile(vswhere):
+        r = subprocess.run([vswhere, "-all", "-products", "*", "-property", "installationPath"], capture_output=True, text=True)
+        roots = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+    found = []
+    for root in roots:
+        for crt in glob.glob(os.path.join(root, "VC", "Redist", "MSVC", "*", "x64", "Microsoft.VC14*.CRT")):
+            if all(os.path.isfile(os.path.join(crt, n)) for n in names):
+                ver = tuple(int(p) for p in re.findall(r"\d+", os.path.basename(os.path.dirname(os.path.dirname(crt)))))
+                found.append((ver, crt))
+    if not found:
+        print("no Visual Studio Redist folder here: the package has no Visual C++ runtime for AMD's FSR library")
+        return 0
+    crt = max(found)[1]
+    os.makedirs(dest, exist_ok=True)
+    n = 0
+    for name in names:
+        out = os.path.join(dest, name)
+        if os.path.isfile(out) and os.path.getsize(out) == os.path.getsize(os.path.join(crt, name)):
+            continue
+        shutil.copyfile(os.path.join(crt, name), out)
+        n += 1
+    print("Visual C++ runtime (%d files) from %s" % (n, crt))
+    return n
+
+
 def tracked(*paths):
     r = subprocess.run(["git", "ls-files", "-z", "--"] + list(paths), cwd=ROOT, check=True, stdout=subprocess.PIPE)
     return [f for f in r.stdout.decode("utf-8").split("\0") if f]
@@ -297,8 +359,10 @@ def package(a):
     shutil.copytree(a.publish, out)
     copy(a.setup, os.path.join(out, "ReLink-Setup.exe"))   # (the builder's Repair runs it)
     copy(os.path.join(ROOT, "LICENSE"), os.path.join(out, "LICENSE"))
+    copy(os.path.join(ROOT, "NOTICE.md"), os.path.join(out, "NOTICE.md"))   # (the copyright notices)
     tools = os.path.join(out, "tools")
-    for f in tracked("assets", "gpu", "host", "nx2", "scripts", "third_party"):
+    # (tools: dump_check.py and dump_repair.py, which make_game.py runs on the player's dump, issue 14)
+    for f in tracked("assets", "gpu", "host", "nx2", "scripts", "third_party", "tools"):
         copy(os.path.join(ROOT, f), os.path.join(tools, *f.split("/")))
     if a.list:
         if not profile(argparse.Namespace(list=a.list, work=os.path.join(tools, "work"))) == 0:
@@ -312,6 +376,8 @@ def package(a):
     else:
         print("no setup list: the package has no play profile and no prebuilt third_party files")
     sdl_libraries(os.path.join(tools, "third_party", "sdl2"))
+    ffx_library(os.path.join(tools, "third_party", "ffx"))
+    vc_runtime(os.path.join(tools, "third_party", "ffx", "vcrt"))
     print("package folder: %s" % out)
     return 0
 

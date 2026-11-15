@@ -399,7 +399,10 @@ public partial class MainWindow
         clock.Start();
         Tick();
         if (Storage.WorkChosen && !args.Contains("--work")) args.AddRange(new[] { "--work", Storage.Work });   // (the build files where the player chose)
-        runner = new Runner(tools, args);
+        // (NVIDIA DLSS: the player ticked it on the Display page, which accepts NVIDIA's DLSS SDK license; the SDK comes from NVIDIA
+        // at each build, only what is missing, into the launcher's own folder, never into the game folder's files shared with others)
+        if (s.NvidiaDlss && !args.Contains("--fetch-ngx-sdk")) args.AddRange(new[] { "--fetch-ngx-sdk", "--accept-nvidia-license" });
+        runner = new Runner(tools, args) { NgxSdk = s.NvidiaDlss ? Path.Combine(Storage.Base, "ngx-sdk") : null };
         runner.Line += l => Dispatcher.BeginInvoke(() => Line(l));
         runner.Finished += failure => Dispatcher.BeginInvoke(() => Ended(failure));
         runner.Start();
@@ -784,6 +787,20 @@ public partial class MainWindow
         staff["download"]?.Problem();
         ShowProblem(why, tools: false);
         ProblemTitle.Text = L("La mise à jour n'a pas pu être téléchargée", "The update could not be downloaded");
+    }
+
+    /// The game folder built again with the tools there are (NVIDIA DLSS turned on: what it changes is compiled, NVIDIA's SDK
+    /// fetched first), on the update's screen with nothing to download
+    internal void Rebuild(Tools tools, string folder)
+    {
+        updating = true;
+        outPath = folder;
+        finished = "";
+        MakeRows(update: true);
+        rows.GetValueOrDefault("download")?.Small(L("Rien à télécharger", "Nothing to download"));
+        BuildTitle.Text = L("Reconstruction du jeu avec NVIDIA DLSS", "Building your game again with NVIDIA DLSS");
+        BuildSub.Text = folder;
+        Run(tools, new List<string> { "--update", folder }, keepRows: true);
     }
 
     /// The new tools are here: the folder built again with them (only what changed is compiled)

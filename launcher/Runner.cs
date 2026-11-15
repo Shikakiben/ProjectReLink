@@ -67,13 +67,17 @@ sealed class Runner
     public event Action<string>? Line;
     public event Action<string?>? Finished;
 
+    /// NVIDIA DLSS (the Display page's switch, its license accepted there): the folder NVIDIA's DLSS SDK is fetched into and
+    /// built with (RELINK_NGX_SDK); null: built without it
+    public string? NgxSdk;
+
     public Runner(Tools tools, List<string> args)
     {
         this.tools = tools;
         this.args = args;
     }
 
-    static ProcessStartInfo Info(Tools tools, IEnumerable<string> args)
+    static ProcessStartInfo Info(Tools tools, IEnumerable<string> args, string? ngxSdk = null)
     {
         var si = new ProcessStartInfo(tools.Python)
         {
@@ -87,6 +91,7 @@ sealed class Runner
         // (written into the game folder's version file: the game starts this app again to update, host/hos_update.c)
         if (Environment.ProcessPath != null) si.Environment["RELINK_BUILDER_EXE"] = Environment.ProcessPath;
         si.Environment.Remove("RELINK_NGX_SDK");
+        if (!string.IsNullOrEmpty(ngxSdk)) si.Environment["RELINK_NGX_SDK"] = ngxSdk;
         // (the folder's own compiler, headers and libraries, when it has them: nothing of the PC's but Windows' own)
         var sets = new[] { ("EMSDK", "emsdk"), ("RX_CPM", "cpm"), ("WGPU_NATIVE", "wgpu-native") };
         foreach (var (name, folder) in sets)
@@ -107,7 +112,7 @@ sealed class Runner
         {
             try
             {
-                using var p = Process.Start(Info(tools, args))!;
+                using var p = Process.Start(Info(tools, args, NgxSdk))!;
                 process = p;
                 p.ErrorDataReceived += (_, e) => { if (e.Data != null) Line?.Invoke(e.Data); };
                 p.BeginErrorReadLine();

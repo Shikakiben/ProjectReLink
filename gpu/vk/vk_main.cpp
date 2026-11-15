@@ -21,6 +21,7 @@
 #include "gpu_choice.h"
 #include "vk_menu.h"
 #include "vk_dlss.h"
+#include "vk_fsr.h"
 #include "vk_reflex.h"
 #include "vk_progress.h"
 
@@ -237,8 +238,11 @@ bool create_device() {
     // (relink) on by default: with a marker before each draw and dispatch the device has not been lost (five
     // runs); without them it was, every run, shortly after OoT's first gameplay frames (nvlddmkm event 153; the
     // extension alone, RX_VK_CHECKPOINTS=ext, did not keep it). The race they hide is not found yet.
-    // RX_VK_CHECKPOINTS=0: off
-    if (!getenv("RX_VK_CHECKPOINTS") || strcmp(getenv("RX_VK_CHECKPOINTS"), "0") != 0)
+    // RX_VK_CHECKPOINTS=0: off. RX_VK_CHECKPOINTS=marker: VK_AMD_buffer_marker's markers instead, where the driver has them
+    // (NVIDIA's does): written into system memory as the GPU passes them, they are still there after a reset, where an RTX
+    // 5070 Ti that hung gave back no NV checkpoint at all (issue 7: "0 checkpoints (17925724 markers set)")
+    const bool want_markers = getenv("RX_VK_CHECKPOINTS") && !strcmp(getenv("RX_VK_CHECKPOINTS"), "marker");
+    if (!want_markers && (!getenv("RX_VK_CHECKPOINTS") || strcmp(getenv("RX_VK_CHECKPOINTS"), "0") != 0))
         optional(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME, dev.checkpoints);
     // (asked for only: a marker written twice a draw, where the NV ones are not there to hide a race)
     if (const char* c = getenv("RX_VK_CHECKPOINTS"); !dev.checkpoints && c && strcmp(c, "0") != 0 && strcmp(c, "ext") != 0)
@@ -246,6 +250,7 @@ bool create_device() {
     optional(VK_EXT_DEVICE_FAULT_EXTENSION_NAME, dev.device_fault);
     optional(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME, dev.coop_matrix);
     dlss_device_extensions(want, exts);   // (relink: NVIDIA DLSS's, vk_dlss.cpp)
+    fsr_device_extensions(want, exts);    // (relink: what AMD FSR's runtime takes by name, vk_fsr.cpp)
     reflex_device_extensions(want, exts);   // (relink: NVIDIA Reflex's, vk_reflex.cpp)
     optional(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME, dev.float_atomic_add);   // (relink: native float adds, emit_spirv_atomic.cpp)
     // (relink) EDEN_NX2_MAXRECONV=1: maximal reconvergence for programs with subgroup operations (emit_spirv.cpp). It needs
@@ -380,7 +385,7 @@ bool create_device() {
     pv.transformFeedbackPreservesProvokingVertex = VK_FALSE;
     dev.provoking_vertex = dev.provoking_vertex && pv.provokingVertexLast;
     dev.conditional_rendering = dev.conditional_rendering && cond.conditionalRendering;
-    // (upstream cd906265) the occlusion queries' real counts (vk_replay.cpp, RX_VK_OCC_QUERIES): a sample count, not only "any", and
+    // the occlusion queries' real counts (vk_replay.cpp, RX_VK_OCC_QUERIES): a sample count, not only "any", and
     // their reset from the CPU once read (both on when the device has them: the queried chain is what it is created with)
     dev.occlusion_precise = f.features.occlusionQueryPrecise == VK_TRUE;
     dev.host_query_reset = f12.hostQueryReset == VK_TRUE;
@@ -403,7 +408,7 @@ bool create_device() {
     dev.vk13 = f13;
     {   // (relink, after TotK Recomp's vk_caps.c) NVN's programs are written for 32 lanes: the translator is told 32, and the lane
         // shuffles of OoT's networks and the lane masks of its mesh programs depend on it. NVIDIA's GPUs have no other size; AMD's
-        // default to 64 where they like, and the networks' output came out as coloured noise (upstream issues 10 and 14)
+        // default to 64 where they like, and the networks' output came out as coloured noise
         VkPhysicalDeviceSubgroupSizeControlProperties sc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
         VkPhysicalDeviceSubgroupProperties sg{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
         sg.pNext = &sc;
@@ -451,6 +456,7 @@ bool create_device() {
     if (dev.buffer_marker) buffer_markers_init();
     coopmat_init();
     reflex_device_created();
+    fsr_start();   // (relink: whether AMD FSR runs here, in the log at once, vk_fsr.cpp)
     if (dev.push_descriptor) {
         VkPhysicalDevicePushDescriptorPropertiesKHR pp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR};
         VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -958,4 +964,22 @@ const MkwVkRenderer* mkwvk_init(const MkwVkHost* h) {
 
 namespace mkwvk {
 HWND app_window() { return main_window; }   // (relink: the Insert menu's Fullscreen row)
+
+// (relink, issues 21 and 23) The device is lost: nothing is drawn again in this run, while the game itself goes on (its sound,
+// the frame counter), and players took it for a load that never ends: "black screen after the intro, waited a long time".
+// Said once, in the log in plain words and in a box on its own thread (the replay goes on to write its report); the game is
+// left running so the log keeps what follows
+void device_lost_notice() {
+    logf("vk: THE GRAPHICS CARD STOPPED (device lost): the picture stays black until the game is started again. "
+         "Please send relink_log.txt with a report");
+#ifdef _WIN32
+    if (dev.offscreen || getenv("HOS_HEADLESS")) return;   // (no window: shader preparation, tests)
+    std::thread([name = std::string(dev.props.deviceName)] {
+        const std::string text = "The graphics card (" + name + ") stopped responding to ReLink (Vulkan: device lost), so the "
+            "picture will stay black. The game cannot recover from this: close it and start it again.\n\nIf it happens again at "
+            "the same place, please open an issue on ReLink's GitHub page and attach relink_log.txt from the game folder.";
+        MessageBoxA(nullptr, text.c_str(), "Project ReLink: graphics card stopped", MB_OK | MB_ICONERROR | MB_TOPMOST);
+    }).detach();
+#endif
+}
 } // namespace mkwvk

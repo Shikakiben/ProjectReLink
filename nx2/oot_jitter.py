@@ -20,8 +20,8 @@ offset back from the camera's uniform buffer. Which view is the scene's, the ren
 this: the other views of the picture's ratio (a reflection, a portrait) are drawn without DLSS and move by under a pixel
 of the scene's size, too little to see.
 
-Installed only in a build with NVIDIA's DLSS SDK (make_game.py sets OOT_DLSS_JITTER=1 for the lift then): other builds have
-none of this code.
+Installed in every build (make_game.py sets OOT_DLSS_JITTER=1 for the lift: AMD FSR, which needs no SDK, wants it too);
+without OOT_DLSS_JITTER=1 the lift has none of this code.
 """
 
 import os
@@ -49,7 +49,7 @@ def _text(xreg, yreg):
 
 
 def wanted():
-    """A build with NVIDIA DLSS (make_game.py: RELINK_NGX_SDK with its library): OOT_DLSS_JITTER=1, in the lift's key"""
+    """OOT_DLSS_JITTER=1 (make_game.py sets it for every build: DLSS and FSR), in the lift's key"""
     return os.environ.get("OOT_DLSS_JITTER") == "1"
 
 

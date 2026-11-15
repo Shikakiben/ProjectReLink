@@ -3,6 +3,7 @@
    executable. Decided at rx_start, before any other rx_* call; a DLL that is missing or finds no usable Vulkan
    device leaves the WebGPU renderer in place (logged). */
 #include "hos.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #define WIN32_LEAN_AND_MEAN
@@ -239,6 +240,7 @@ static void flush_early(void) {
 }
 
 static void (*program_set_fn)(const nvn_prog *p);   /* (relink) relink_vk.dll's relink_program_set, when there */
+static int preparing_shaders;   /* (relink) rx_prepare_shaders: no window, no box when the renderer is missing */
 /* dll: mkw_vk.dll (our Vulkan back end) or mkw_eden.dll (Eden's renderer driven natively, gpu/eden): one export */
 static const MkwVkRenderer *load_vulkan(const char *dll) {
     char path[MAX_PATH];
@@ -248,7 +250,24 @@ static const MkwVkRenderer *load_vulkan(const char *dll) {
     strcpy(slash + 1, dll);
     HMODULE m = LoadLibraryA(path);
     if (!m) {
-        hos_log("rx: RX_BACKEND=vulkan, but %s did not load (%lu): WebGPU", path, GetLastError());
+        const DWORD err = GetLastError();
+        hos_log("rx: RX_BACKEND=vulkan, but %s did not load (%lu): WebGPU", path, err);
+#ifdef _WIN32
+        /* (relink, issue 23) Two of a player's logs: relink_vk.dll "did not load (126)" and no SDL either, the game started
+           from a folder without them (the libraries are in bin\ since the launcher), and a window that stayed black for good
+           with nothing on screen to say why. Said in plain words, and in a box (not while shaders are prepared) */
+        hos_log("rx: the renderer could not be loaded (%s): nothing will be drawn. Start the game from ReLink (the launcher), "
+                "or install the game again there", err == ERROR_MOD_NOT_FOUND ? "the file or a library it needs is missing"
+                                                 : err == ERROR_BAD_EXE_FORMAT ? "the file is damaged" : "Windows refused it");
+        if (!preparing_shaders && !getenv("HOS_HEADLESS") && strcmp(dll, "relink_vk.dll") == 0) {
+            char text[MAX_PATH + 512];
+            snprintf(text, sizeof text,
+                     "ReLink's renderer could not be loaded:\n\n%s\n(Windows error %lu)\n\nThe window would stay black. Start the "
+                     "game from ReLink (the launcher), not from a copy of relink-game.exe elsewhere; if it still happens, use "
+                     "Update in ReLink, or install the game again from it.", path, err);
+            MessageBoxA(NULL, text, "Project ReLink", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        }
+#endif
         return NULL;
     }
     vk_module = m;
@@ -284,6 +303,7 @@ int rx_start(void *hwnd) {
 /* (relink) relink --prepare-shaders: the Vulkan back end started with no window and no game, which prepares
    every shader in its start (gpu/vk/vk_main.cpp started_up) and is then let go. 0 when there is no usable Vulkan */
 int rx_prepare_shaders(void) {
+    preparing_shaders = 1;
     const MkwVkRenderer *r = load_vulkan("relink_vk.dll");
     return r && r->start(NULL);
 }

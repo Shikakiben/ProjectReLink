@@ -331,6 +331,72 @@ static void turn(size_t i, int64_t now, float dpitch, float dyaw) {
     putf(at + YAW_AT, own_yaw[i]), putf(at + PITCH_AT, own_pitch[i]);
 }
 
+/* ---- when the game does not take the angles (issues 13 and 2) ----
+   Aiming the slingshot (issue 13) the view is not made from the player camera's controller: the angles written here did
+   nothing, the stick had only the small nudge, and the aim did not move at all (the mouse as the stick aims). In a house
+   (issue 2) the game's own camera puts its angles back, and the view shook between the two. So each read while the mouse
+   moves looks at what the game did with the angles written at the read before: kept them and moved them a little (the
+   manual camera: the view is ours, FOLLOWED), left them as written (not looked at yet, or not used), or put them back
+   nearer to where they were before the write. After FALLBACK_NS of motion with no FOLLOWED read (a pulse, 90 ms in, has
+   started the manual state by then wherever the game uses them) the motion goes to the stick instead, as with the mouse
+   as the stick, until the mouse rests after the game has moved the angles itself since (the camera is the game's again:
+   native look is tried at the next motion). While the game leaves them where they were, the stick keeps the mouse across
+   rests, so an aim goes on. HOS_MOUSE_FALLBACK=0: never (as before). */
+/* The trial starts at the first write of a motion (or with a new controller): a pulse given since and not answered within
+   UNANSWERED_NS (the game does not use the angles: aiming), or REVERTS reads that put the angles back with none FOLLOWED (a
+   fixed camera), or TRIAL_MAX_NS with none FOLLOWED, and the motion goes to the stick. Back to native look when the game moves
+   its angles itself while the stick has the mouse (the camera follows the stick again: after a second of it, or at the next
+   rest); a fallback again within 3 s of coming back waits for a rest (no to and fro in a house). */
+static const int64_t UNANSWERED_NS = 130000000, TRIAL_MAX_NS = 700000000, LIVE_BACK_NS = 1000000000, AGAIN_NS = 3000000000LL;
+enum { REVERTS = 4 };
+static float wrote_y, wrote_p, before_y, before_p, fb_y, fb_p;
+static uint64_t wrote_at, native_ctl;
+static int64_t wrote_ns, last_followed, motion_t0, last_motion, native_t0, fb_t0, native_back;
+static int fallback, fb_moved, fb_sticky, reverts;
+static long long fallbacks;
+
+static int fallback_on(void) {
+    static int on = -1;
+    if (on < 0) on = env_percent("HOS_MOUSE_FALLBACK", 1) != 0;
+    return on;
+}
+
+/* (holding busy, a controller in use) what the game did since the last write; whether the motion goes to the stick */
+static int stick_instead(int64_t now, int moving) {
+    const float cy = getf(ctl[0] + YAW_AT), cp = getf(ctl[0] + PITCH_AT);
+    if (!fallback && wrote_at == ctl[0] && now - wrote_ns < 100000000 && (cy != wrote_y || cp != wrote_p)) {
+        const float d_wrote = fabsf(wrap180(cy - wrote_y)) + fabsf(cp - wrote_p);
+        const float d_before = fabsf(wrap180(cy - before_y)) + fabsf(cp - before_p);
+        if (d_wrote < d_before && d_wrote < 3.0f) last_followed = now;
+        else reverts++;
+        wrote_at = 0;   /* (one verdict a write) */
+    }
+    if (fallback && (fabsf(wrap180(cy - fb_y)) > 1.0f || fabsf(cp - fb_p) > 1.0f)) fb_moved = 1;
+    int new_motion = 0;
+    if (moving) {
+        if (!motion_t0 || now - last_motion > REST_NS) motion_t0 = now, new_motion = 1;
+        last_motion = now;
+    }
+    if (!fallback_on()) return 0;
+    if (fallback) {
+        if (!fb_moved || !(new_motion || (!fb_sticky && now - fb_t0 > LIVE_BACK_NS))) return 1;
+        fallback = 0, native_t0 = 0, native_back = now;   /* (the game moves its camera again: native look) */
+    }
+    if (!moving) return 0;
+    if (!native_t0 || new_motion || native_ctl != ctl[0]) native_t0 = now, native_ctl = ctl[0], reverts = 0;
+    if (last_followed >= native_t0) return 0;
+    const int unanswered = pulse_last > native_t0 && now - pulse_last > UNANSWERED_NS;
+    if (unanswered || reverts >= REVERTS || now - native_t0 > TRIAL_MAX_NS) {
+        fallback = 1, fb_moved = 0, fb_y = cy, fb_p = cp, fb_t0 = now;
+        fb_sticky = native_back && now - native_back < AGAIN_NS;
+        if (!(++fallbacks & (fallbacks - 1)))
+            hos_log("mouse native: the game does not take the camera's angles (%s): the mouse as the stick until it does "
+                    "(%lld so far)", unanswered ? "a pulse unanswered: aiming?" : reverts >= REVERTS ? "put back: a fixed camera?"
+                    : "not followed", fallbacks);
+    }
+    return fallback;
+}
+
 /* With each read of the controller (nn_hid.c, the game's threads): 0 if the mouse is not captured, 1 if its motion
    turned the camera, -1 if no camera was found and the motion was given back (the stick's way takes it) */
 int hos_mouse_native(void) {
@@ -355,6 +421,12 @@ int hos_mouse_native(void) {
     }
     probe(now);
     answer_seen(now);   /* (before this read's own writes: what the game did since the last ones) */
+    if (stick_instead(now, dx || dy)) {   /* (the game does not take the angles: the stick's way, issues 13 and 2) */
+        busy = 0;
+        if (dx || dy) hos_mouse_give_back(dx, dy);
+        return -1;
+    }
+    before_y = getf(ctl[0] + YAW_AT), before_p = getf(ctl[0] + PITCH_AT);
     /* (the stick's direction for the motion: right is +x; up is +y, the mouse moving away from the player unless inverted.
        The last motion's while the small deflection is still held, so a read with no new count is not a rest) */
     const int32_t my = invert ? dy : -dy;
@@ -365,6 +437,7 @@ int hos_mouse_native(void) {
         for (size_t i = 0; i < nctl; i++)
             if (!memcmp(GP(ctl[i]), limits_sig, sizeof limits_sig) && angles(ctl[i])) turn(i, now, dpitch, dyaw);
         seen_yaw = getf(ctl[0] + YAW_AT), seen_pitch = getf(ctl[0] + PITCH_AT);   /* (ours: not the game's answer) */
+        wrote_y = seen_yaw, wrote_p = seen_pitch, wrote_at = ctl[0], wrote_ns = now;
         InterlockedExchange(&nudge_x, sx);
         InterlockedExchange(&nudge_y, sy);
         InterlockedExchange64(&nudge_until, now + 40000000);

@@ -74,6 +74,11 @@ frames a second or unlocked, frame generation), the game's language and the cont
 you play, so that every frame lasts the same time on a 100 or 144 Hz display, and puts the display's own rate back
 afterwards. In the game, **Insert** or **F1** opens the same menu, and **F11** switches full screen.
 
+**Upscaler** (since 0.7): what scales the 3D up to the screen. The game's own network by default; **AMD FSR 3.1** on any
+graphics card (AMD's library comes with ReLink); or **NVIDIA DLSS / DLAA** on an RTX card, after turning on **NVIDIA DLSS** on
+the launcher's Display page: that builds the game again with NVIDIA's DLSS SDK, downloaded from NVIDIA under NVIDIA's license.
+With FSR or DLSS, set Sharpness to about 80 %. The frame rates below are measured without them.
+
 The launcher is in English; French is one click away on its Game page. An Xbox controller or any XInput controller works,
 and so do keyboard and mouse (the keys are listed on the Controls page). Since 0.6.2 the install also brings SDL, which the
 game uses for the other controllers (Switch Pro, DualSense, DualShock 4): 0.6.1 shipped without it and they did nothing in
@@ -152,9 +157,10 @@ resolution), boss fights, sessions longer than half an hour, and AMD and Intel c
 
 ## If the game slows down with adult Link: check your dump
 
-Some dumps hold a few damaged textures. The game then loads the model that needs one again and again for ever, which keeps
-more than one CPU core busy as soon as Link is an adult. Two tools in this repository deal with it, from your own files
-(nothing of the game is in them):
+Some dumps hold a few damaged textures. The game then never finishes loading the model that needs one: the fairy fountains'
+floor and walls are not drawn, and as an adult the model is loaded again and again for ever, which keeps more than one CPU
+core busy. Since 0.7.2 every install and update does the repair below by itself (the mod `mods\00-dump-repair` in the game
+folder). Two tools in this repository deal with it, from your own files (nothing of the game is in them):
 
 ```powershell
 python -I tools/dump_check.py "C:\Games\ReLink\romfs\Tex"
@@ -182,7 +188,8 @@ python -I nx2/make_game.py --romfs "C:\path\romfs" --exefs "C:\path\exefs" --out
 
 `--game <path>` takes either one (a `.nup`, or a folder holding `exefs` and `romfs`) in place of those options.
 `--check` with your `.nup` only checks the game's version. `--log file` keeps the output. `RELINK_JOBS=<n>` limits how many
-files compile at once.
+files compile at once. `RELINK_LOW_PRIORITY=1` runs the compilers below normal priority: the PC stays more responsive
+while the game compiles, and the build can take longer.
 
 You need:
 
@@ -202,15 +209,6 @@ described in [docs/releasing.md](docs/releasing.md).
 1. `nx2/lift.py` translates the game's ARM64 code to C.
 2. `nx2/build.py` compiles that C together with `host/`, which plays the part of the console's system.
 3. `host/nvn_native.c` records the game's graphics calls, and `gpu/vk/` replays them on Vulkan.
-
-## License
-
-Project ReLink is free software under the [GNU General Public License, version 3 or later](LICENSE) (GPL-3.0-or-later). It
-reuses and modifies code published under the GPL by other projects (modified in November 2026); each part keeps its
-copyright notices and licenses in its files and folders.
-
-Project ReLink is an unofficial fan project, not affiliated with or endorsed by Nintendo. The Legend of Zelda and Ocarina
-of Time are trademarks of Nintendo.
 
 ---
 
@@ -234,6 +232,11 @@ d'installer quoi que ce soit.
    en choisir un, le déposer sur la fenêtre, ou donner les dossiers `romfs` et `exefs`.
 4. Appuyez sur **Install**. Comptez 10 à 45 minutes selon le processeur ; le PC reste utilisable.
 5. Appuyez sur **Play**. Le lanceur est en anglais par défaut ; le français se choisit dans sa page Game.
+
+**Upscaler** (depuis la 0.7) : ce qui agrandit la 3D jusqu'à l'écran. Le réseau du jeu par défaut ; **AMD FSR 3.1** sur toutes
+les cartes graphiques (la bibliothèque d'AMD est livrée avec ReLink) ; ou **NVIDIA DLSS / DLAA** sur une carte RTX, après avoir
+activé **NVIDIA DLSS** dans la page Display du lanceur : le jeu est reconstruit avec le SDK DLSS, téléchargé chez NVIDIA sous
+la licence de NVIDIA. Avec FSR ou DLSS, mettez la netteté vers 80 %.
 
 Il faut Windows 10 ou 11 en 64 bits, un processeur avec AVX2, une carte graphique avec Vulkan 1.3 et les mesh shaders
 (GeForce RTX 20 ou plus récente, Radeon RX 6000 ou plus récente, Intel Arc ; nous n'avons testé que sur NVIDIA), 16 Go de RAM
@@ -267,8 +270,42 @@ nettoyage du pilote a quitté le fil qui dessine. Le même build avec et sans, t
 plus de 25 ms en tournant au lieu de 59,5 en moyenne, et 17 % de temps perdu en moins à l'arrivée sur la place du
 marché. Le premier démarrage après cette mise à jour prépare les shaders une nouvelle fois.
 
-### Licence
+---
 
-GPL-3.0-or-later ([LICENSE](LICENSE)). Le projet reprend et modifie du code publié sous GPL par d'autres projets
-(modifications de novembre 2026) ; chaque partie garde ses mentions de droits d'auteur et ses licences dans ses fichiers.
+## License
+
+Project ReLink is free software under the [GNU General Public License, version 3 or later](LICENSE) (GPL-3.0-or-later).
+
+Project ReLink is a modified version of [Longshot](https://git.magicbean.dev/MagicBeanDev/Longshot), which is itself a fork
+of [Hookshot](https://github.com/NotRexed/Hookshot) by NotRexed; both are released under the GPL-3.0-or-later. ReLink's
+changes to their code were made in November 2026.
+
+    Hookshot: Copyright (C) 2026 NotRexed and the Hookshot contributors
+    Longshot: Copyright (C) 2026 the Longshot contributors
+
+Through them it also includes code from other projects under the GPL (Eden, suyu, TOTKPort's renderer) and parts under
+licenses that work with the GPL (Sirit, the Vulkan Memory Allocator, SDL, Opus, stb, zbic, the a64-kit tools, and AMD FidelityFX's FSR library shipped with its license); each
+keeps its copyright notices and license in its files and folders. The same notices are in [NOTICE.md](NOTICE.md), which
+every release ships.
+
+Project ReLink is an unofficial fan project, not affiliated with or endorsed by Nintendo. The Legend of Zelda and Ocarina
+of Time are trademarks of Nintendo.
+
+### Licence (français)
+
+Project ReLink est un logiciel libre sous [licence publique générale GNU, version 3 ou ultérieure](LICENSE)
+(GPL-3.0-or-later).
+
+Project ReLink est une version modifiée de [Longshot](https://git.magicbean.dev/MagicBeanDev/Longshot), lui-même un fork de
+[Hookshot](https://github.com/NotRexed/Hookshot) de NotRexed ; tous deux sont publiés sous GPL-3.0-or-later. Les
+modifications de ReLink à leur code datent de novembre 2026.
+
+    Hookshot: Copyright (C) 2026 NotRexed and the Hookshot contributors
+    Longshot: Copyright (C) 2026 the Longshot contributors
+
+Par eux, il contient aussi du code d'autres projets sous GPL (Eden, suyu, le moteur de rendu de TOTKPort) et des parties
+sous des licences compatibles avec la GPL (Sirit, Vulkan Memory Allocator, SDL, Opus, stb, zbic, les outils a64-kit, et la bibliothèque FSR d'AMD FidelityFX livrée avec sa licence) ;
+chacune garde ses mentions de droits d'auteur et sa licence dans ses fichiers et dossiers. Les mêmes mentions sont dans
+[NOTICE.md](NOTICE.md), livré avec chaque version.
+
 Projet de fans non officiel, sans lien avec Nintendo ; The Legend of Zelda et Ocarina of Time sont des marques de Nintendo.

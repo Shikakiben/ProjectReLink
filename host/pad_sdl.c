@@ -183,10 +183,14 @@ static void motion_poll(int64_t now, int count) {
         return;
     if (debug && now >= motion_log_ns) {   /* (twice a second: what the game gets) */
         motion_log_ns = now + 500000000LL;
+        /* (relink, issue 8) and the raw readings, the gyro's spread and how long the pad has been still: a Switch Pro pad
+           whose bias was never learned, and whose left/right went the wrong way, could not be told apart from the line alone */
         hos_log("hid: motion: up (%+.2f, %+.2f, %+.2f), pitch/yaw/roll %+.2f %+.2f %+.2f rad/s, aim tilt %+.3f, yaw "
-                "%+.3f turns/s, bias (%+.4f, %+.4f, %+.4f)", motion.up[0], motion.up[1], motion.up[2], motion.rates[0],
-                motion.rates[1], motion.rates[2], motion.pitch, motion.out.gyro[1], motion.bias[0], motion.bias[1],
-                motion.bias[2]);
+                "%+.3f turns/s, bias (%+.4f, %+.4f, %+.4f); raw gyro (%+.3f, %+.3f, %+.3f) rad/s, accel (%+.2f, %+.2f, %+.2f) "
+                "m/s2, gyro spread %.4f rad/s (still under %.2f), accel %.3f G spread %.4f, still %.1f s",
+                motion.up[0], motion.up[1], motion.up[2], motion.rates[0], motion.rates[1], motion.rates[2], motion.pitch,
+                motion.out.gyro[1], motion.bias[0], motion.bias[1], motion.bias[2], g[0], g[1], g[2], a[0], a[1], a[2],
+                sqrtf(motion.gvar), HOS_MOTION_STILL_GYRO, motion.amean, sqrtf(motion.avar), motion.still_t);
     }
     HosMotionSample r;
     r.st = motion.out;

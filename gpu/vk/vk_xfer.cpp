@@ -359,7 +359,7 @@ void clear_tex(VkCommandBuffer cmd, NvnState& st, const nvn_p_clear_tex& p) {
             lv.set_layers = 1, lv.min_layer = (uint16_t)(s.layer + k), lv.nlayers = 1;
             const VkImageView view = texture_view(s.tex, p.tex, &lv, VK_IMAGE_VIEW_TYPE_2D, ViewUse::Attachment);
             if (!view) continue;
-            // (upstream 9928d74d: an attachment view of a compressed image is a raw one, one texel a block: its area and the
+            // (an attachment view of a compressed image is a raw one, one texel a block: its area and the
             // rect in blocks, as targets() sizes a pass over it)
             const bool raw = s.tex->format >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && s.tex->format <= VK_FORMAT_BC7_SRGB_BLOCK;
             const uint32_t aw = raw ? (lw + 3) / 4 : lw, ah = raw ? (lh + 3) / 4 : lh;

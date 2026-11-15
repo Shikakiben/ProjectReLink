@@ -46,7 +46,7 @@ import toolchain as _toolchain
 LINUX, CROSS = not _toolchain.windows(), _toolchain.windows() and os.name != "nt"
 # (SDL2.dll is sdl2-compat: it loads SDL3.dll from beside the exe. Left out of bin\ since v2.0.0, it said "Failed loading SDL3
 # library" three times and no controller worked: Discord #bug-reporting, 11-08)
-BESIDE = ["relink", "relink_vk.so", "libSDL2-2.0.so.0"] if LINUX else ["relink-game.exe", "relink_vk.dll", "SDL2.dll", "SDL3.dll", "wgpu_native.dll"]
+BESIDE = ["relink", "relink_vk.so", "libSDL2-2.0.so.0"] if LINUX else ["relink-game.exe", "relink_vk.dll", "SDL2.dll", "SDL3.dll", "wgpu_native.dll", "amd_fidelityfx_vk.dll", "LICENSE-FidelityFX.txt"]
 LANGUAGES = [("en-US", "English (US)"), ("en-GB", "English (UK)"), ("fr", "French (France)"), ("fr-CA", "French (Canada)"), ("de", "German"),
              ("it", "Italian"), ("es", "Spanish (Spain)"), ("es-419", "Spanish (Latin America)"), ("pt-BR", "Portuguese (Brazil)"), ("nl", "Dutch"),
              ("pl", "Polish"), ("ru", "Russian"), ("ja", "Japanese"), ("ko", "Korean"), ("zh-Hans", "Chinese (Simplified)"),
@@ -1010,6 +1010,18 @@ def main(a=None):
     if os.name == "nt":   # (the PC kept awake while this runs: a build is 45 minutes, and sleep stopped it)
         import ctypes
         ctypes.WinDLL("kernel32").SetThreadExecutionState(0x80000000 | 0x00000001)
+        # (relink, issue 6) normal priority for this process and the one-process steps it runs (reading the copy, the lift): started
+        # below normal by the launcher, they ran on an Intel CPU's efficiency cores for over an hour with the performance cores idle.
+        # The compilers stay at normal too, for the same reason; RELINK_LOW_PRIORITY=1 puts them below normal (build.py below_normal)
+        k = ctypes.WinDLL("kernel32")
+        k.GetCurrentProcess.restype = ctypes.c_void_p
+        k.GetPriorityClass.argtypes = [ctypes.c_void_p]
+        k.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        try:
+            if k.GetPriorityClass(k.GetCurrentProcess()) in (0x40, 0x4000):   # (IDLE, BELOW_NORMAL)
+                k.SetPriorityClass(k.GetCurrentProcess(), 0x20)   # (NORMAL_PRIORITY_CLASS)
+        except (OSError, ValueError, TypeError):
+            pass
     if a.check:
         return check(a, a.work)
     if a.update:
@@ -1103,8 +1115,9 @@ def main(a=None):
     if os.path.exists(os.path.join(work, "relink_pieces.prof")) and profile_readable(os.path.join(work, "relink_pieces.prof")):
         env["RX_PGO"] = os.path.join(work, "relink_pieces.prof")
 
-    if ngx_built():   # (NVIDIA DLSS's camera jitter: only in a build with it, nx2/oot_jitter.py)
-        env["OOT_DLSS_JITTER"] = "1"
+    # (relink) the camera jitter DLSS and AMD FSR need (nx2/oot_jitter.py), in every build: FSR needs no SDK. It does
+    # nothing unless one of them draws (the renderer gives the host no size to jitter by otherwise)
+    env["OOT_DLSS_JITTER"] = "1"
     say("stage", "lift", "Translating the game to PC code")
     # (the same game, tools and settings as the lift before: its C is what this lift would write, and nothing recompiles from it. A
     # rebuild after a change to host/ alone skips the minutes of the lift)
@@ -1231,9 +1244,13 @@ def main(a=None):
     game_dir = os.path.join(out, "bin") if launcher else out
     os.makedirs(game_dir, exist_ok=True)
     ffmpeg_dlls = [] if LINUX else sorted(f for f in os.listdir(built) if f.endswith(".dll") and f.startswith(("av", "sw")))
-    for n in BESIDE + ffmpeg_dlls:
+    # (relink, 0.7) Microsoft's Visual C++ runtime for AMD's FSR library, in vcrt beside it: taken only where the PC has none
+    # (gpu/vk/vk_fsr.cpp), so it is never in the way of the runtime Windows has
+    vcrt = [] if LINUX else ["vcrt/" + f for f in ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")]
+    for n in BESIDE + ffmpeg_dlls + vcrt:
         src = os.path.join(built, n)
         if os.path.exists(src):
+            os.makedirs(os.path.dirname(os.path.join(game_dir, n)), exist_ok=True)
             staged.append((src, os.path.join(game_dir, n)))
     staged.append((os.path.join(work, "sa", "image", "image.bin"), os.path.join(out, "image.bin")))
     if launcher:
@@ -1266,6 +1283,14 @@ def main(a=None):
     # as it meets them: not worth stopping a finished build for
     if run(shader_census_cmd(romfs, os.path.join(out, "relink_shaders.bin")), check=False, output=sys.stderr):
         print("the shader list was not made: the game will compile its shaders as it plays", flush=True)
+    # (issue 14) Some dumps hold textures whose first kilobytes are zeros; the game cannot decode them and never finishes loading
+    # the models that need one: the fairy fountains' floor and walls were not drawn, and as an adult the model was loaded again
+    # and again for good. tools/dump_repair.py writes a small mod that stands in for the ones it knows, from the player's own
+    # files; it was a step for the player to run by hand (README), now every build does it. Not worth stopping a build for
+    repair = os.path.join(ROOT, "tools", "dump_repair.py")
+    if os.path.isfile(repair) and run(PY + [repair, romfs, os.path.join(out, "mods", "00-dump-repair")], check=False,
+                                      output=sys.stderr):
+        print("the dump's damaged textures were not checked: the game runs without the stand-ins", flush=True)
     icon = os.path.join(ROOT, "assets", "relink.png")
     if LINUX and os.path.exists(icon):   # (the window's icon: host/posix/display_sdl.c)
         shutil.copy2(icon, os.path.join(out, "relink.png"))

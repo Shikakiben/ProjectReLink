@@ -1210,21 +1210,37 @@ void watch_tex(const Texture* tex, const char* what) {
 }
 /// Whether [gpu, gpu + n) is storage the GPU's images rendered last (covered by ranges render targets took), and the
 /// generation from which the CPU's writes would count (0: not the GPU's)
+/// (relink, issue 10) The targets' ranges may overlap one another: what they cover is measured as a union, a byte counted once.
+/// Added up range by range, an overlap counted twice could make up for a hole no target ever drew into, and the texture over
+/// that hole was taken for the GPU's and never uploaded.
 uint32_t gpu_owned_since(uint64_t gpu, uint64_t n) {
-    uint64_t covered = 0;
+    const uint64_t lo = gpu, hi = gpu + n;
+    uint64_t covered = 0, done_to = lo;   // (done_to: the bytes below it are counted; the map is in address order)
     uint32_t since = UINT32_MAX;
-    auto it = gpu_owned.upper_bound(gpu);
+    auto it = gpu_owned.upper_bound(lo);
     if (it != gpu_owned.begin()) --it;
-    for (; it != gpu_owned.end() && it->first < gpu + n; ++it) {
-        const uint64_t a = std::max(it->first, gpu), b = std::min(it->second.first, gpu + n);
-        if (b <= a) continue;
-        covered += b - a;
-        since = std::min(since, it->second.second);
+    for (; it != gpu_owned.end() && it->first < hi; ++it) {
+        const uint64_t from = std::max({it->first, lo, done_to}), to = std::min(it->second.first, hi);
+        if (it->second.first > lo && it->first < hi) since = std::min(since, it->second.second);
+        if (to <= from) continue;
+        covered += to - from;
+        done_to = to;
     }
     return covered >= n && since != UINT32_MAX ? std::max(since, 1u) : 0;
 }
+/// (relink, issue 10) Whether the GPU can draw into a texture's format at all. A block-compressed one (BC, ETC, ASTC, and the
+/// ASTC textures kept decoded or re-encoded) cannot be a render target, so storage targets used before tells nothing about it:
+/// its texels are the game's, in memory. Taken for the GPU's, such a texture was left empty: the Kokiri Emerald drawn as its
+/// sparkles alone, enemies without their texture on first sight.
+static bool drawable_format(const Texture& t) {
+    if (t.astc || t.bc) return false;
+    const int f = (int)t.format;
+    const bool block = (f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK) ||
+                       (f >= VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK && f <= VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK);
+    return !block;
+}
 
-/// (relink, from upstream PR 2175) A big texture whose whole storage is zero: the image cleared to zero on the GPU, not unswizzled on
+/// (relink) A big texture whose whole storage is zero: the image cleared to zero on the GPU, not unswizzled on
 /// the CPU. All-zero bits are 0 in every format this path takes (not ASTC or BC, not one widened on the way), so the clear is what
 /// the unswizzle would have made. The game's shadow map (12288 x 12288 D16, 288 MB, its storage fresh and zero) took 73 ms of the
 /// replay thread at a scene change; the check reads the storage once, on several threads, and stops at the first byte that is not 0.
@@ -1827,7 +1843,7 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
             vkGetPhysicalDeviceImageFormatProperties(dev.physical, x.format, x.type, VK_IMAGE_TILING_OPTIMAL,
                 x.usage, flags, &limits) == VK_SUCCESS)
             x.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
-        // (upstream 9928d74d, PR 1338: and colour attachment views, raw too. OoT renders the slices of two 64^3 BC4 noise volumes
+        // (and colour attachment views, raw too. OoT renders the slices of two 64^3 BC4 noise volumes
         // as RGBA16UI targets, one texel a block (53509044401d78d2, while an area loads). Without the usage those views were not
         // made, the volumes stayed zero, and the foliage's dithered LOD crossfade, which reads them, left trees bare at mid
         // distance. 3D images take the usage on the driver's word for the 2D one: the query does not cover
@@ -1912,7 +1928,7 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
                    // dynamic-resolution step shared 128 MB blocks, which kept ~1.9 GB free and counted (hs195)
                    image_pool_hint = (astc || is_bc(vf) || is_astc(vf)) ? 1 : 0;
                    // (relink-amd: a block-compressed format the device makes no storage image of: made without that use)
-                   // (upstream 9928d74d: a compressed image refused is made again without its raw attachment usage first, then
+                   // (a compressed image refused is made again without its raw attachment usage first, then
                    // without its raw storage usage; its raw views are then not made, as before)
                    const bool made = create_image(ci, x.image, x.allocation) ||
                                      ((ci.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && is_bc(x.format) &&
@@ -2263,7 +2279,7 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
     // sharing an edge page once re-uploaded garbage over a drawn LUT (the rainbow sky). Opt-in (RX_VK_CPU_OVER_GPU=1): transient render targets share memory the CPU writes for other things, and took that over their texels, and the menus' letters stayed missing with it.
     if (tex->gpu_written && !tex->released) {
         // (relink) and a texture the GPU only cleared: the game's font cache, whose letters the CPU writes as text appears. Its menu text
-        // went missing at random (upstream issues 40 and 44), whenever the clear reached the image first
+        // went missing at random, whenever the clear reached the image first
         static const bool take = getenv("RX_VK_CPU_OVER_GPU") != nullptr;
         if ((!take && !tex->only_cleared) || tex->checked_epoch == epoch) return tex;
         tex->checked_epoch = epoch;
@@ -2340,7 +2356,16 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
     // was unswizzled from that memory: 55 MB for the 3072 x 3072 x 3 shadow map, frame after frame. Not "storage
     // the write watch never saw written": the game fills memory before it makes a pool of it.)
     static const bool upload_all = getenv("RX_VK_UPLOAD_ALL") != nullptr;   // (A/B: such storage uploaded too)
+    // (relink, issue 10) only for a format the GPU can draw into (drawable_format above); RX_VK_RT_SKIP_ANY_FORMAT=1: any, as before
+    static const bool any_format = getenv("RX_VK_RT_SKIP_ANY_FORMAT") && atoi(getenv("RX_VK_RT_SKIP_ANY_FORMAT")) != 0;
     uint32_t owned = !tex->uploaded && !upload_all ? gpu_owned_since(tex->gpu, tex->guest_size) : 0;
+    if (owned && !any_format && !drawable_format(*tex)) {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 30)
+            logf("vk: texture #%u %#llx %ux%u NVN %#x is block-compressed: uploaded from memory although render targets used its "
+                 "storage", tex->id, (unsigned long long)tex->gpu, tex->width, tex->height, tex->nvn_format);
+        owned = 0;
+    }
     if (owned && !remade_skip_old()) {   // (one evicted that came from memory: uploaded from it again. Above)
         std::lock_guard lk(from_memory_mu);
         auto e = evicted_from_memory.find(evicted_key(tex->gpu, tex->width, tex->height, tex->nvn_format));
@@ -3930,7 +3955,7 @@ void texture_frame(uint64_t completed) {
     const uint64_t need_unused = sweep ? std::max<uint64_t>(120, min_unused) : min_unused;
     const uint64_t need_dead = dead_targets ? std::min(need_unused, dead_min_unused) : need_unused;
     static uint64_t n_dead, b_dead, dead_logged_at;
-    // (relink, after upstream's pull request 2826) How far down a pass over the budget goes. A budget that is a size (the
+    // (relink) How far down a pass over the budget goes. A budget that is a size (the
     // card's share, a preset's) asks for its 7/8, as before. The 90% rule's and the driver's limit's are not sizes: each is
     // "what the textures hold, less the excess over a line", crossed again whenever anything grows. Cut to 7/8 of it, a few
     // MB over the line took an eighth of the cache, textures on screen a second before, made again within the camera's

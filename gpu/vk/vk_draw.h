@@ -42,7 +42,7 @@ struct DrawArgs {
     bool mesh = false;
     int groups[3] = {0, 1, 1};
     int first_task = 0;   // (relink: a direct mesh draw's first task workgroup, NVN's DrawMeshTasks(first, count))
-    // (upstream cd906265) an occlusion query around the draw, inside its pass (vk_replay.cpp, RX_VK_OCC_QUERIES); none when null
+    // an occlusion query around the draw, inside its pass (vk_replay.cpp, RX_VK_OCC_QUERIES); none when null
     VkQueryPool occ_pool = VK_NULL_HANDLE;
     uint32_t occ_query = 0;
 };

@@ -18,8 +18,9 @@ public partial class MainWindow
     int origHz;
     bool display60Possible;
 
-    CheckBox Fullscreen = null!, Display60 = null!, FpsCounter = null!, Ultrawide = null!, FramePacing = null!, Audio = null!, Handheld = null!, InvertY = null!;
-    WrapPanel ResolutionGroup = null!, UpscaleGroup = null!, FrameRateGroup = null!, SpeedGroup = null!, FramegenGroup = null!, UiLanguageGroup = null!;
+    CheckBox Fullscreen = null!, Display60 = null!, FpsCounter = null!, Ultrawide = null!, FramePacing = null!, Audio = null!, Handheld = null!, InvertY = null!,
+             NvidiaDlss = null!;
+    WrapPanel ResolutionGroup = null!, UpscalerGroup = null!, UpscaleGroup = null!, FrameRateGroup = null!, SpeedGroup = null!, FramegenGroup = null!, UiLanguageGroup = null!;
     Slider Sharpness = null!;
     TextBlock SharpnessText = null!, Display60Hint = null!, FolderText = null!;
     ComboBox LanguageBox = null!;
@@ -67,7 +68,15 @@ public partial class MainWindow
                   L("Native est la plus nette. Les pourcentages allègent la carte graphique ; le jeu agrandit ensuite l'image.",
                     "Native is the sharpest. The percentages lighten the graphics card's work; the game scales the picture up afterwards."),
                   "Resolution", (1, L("Native", "Native")), (0, L("Automatique", "Automatic")), (2, "75 %"), (3, "67 %"), (5, "58 %"), (4, "50 %"));
-        UpscaleGroup = ChoiceRow(RowsDisplay, L("Mise à l'échelle", "Upscaling"), null, "Upscale", (0, L("Simple", "Simple")), (1, "Catmull-Rom"), (2, "Lanczos"));
+        UpscalerGroup = ChoiceRow(RowsDisplay, L("Agrandissement de la 3D", "Upscaler"),
+                  L("Ce qui agrandit la 3D jusqu'à l'écran et lisse ses bords. AMD FSR marche sur toutes les cartes graphiques ; NVIDIA DLSS demande une carte RTX et la case NVIDIA DLSS ci-dessous. Avec FSR ou DLSS, mettez la netteté vers 80 %.",
+                    "What scales the 3D up to the screen and smooths its edges. AMD FSR works on every graphics card; NVIDIA DLSS needs an RTX card and the NVIDIA DLSS switch below. With FSR or DLSS, set Sharpness to about 80 %."),
+                  "Upscaler", (0, L("Celui du jeu", "The game's own")), (3, "AMD FSR"), (4, L("AMD FSR, AA natif", "AMD FSR native AA")), (1, "NVIDIA DLSS"), (2, "NVIDIA DLAA"));
+        UpscaleGroup = ChoiceRow(RowsDisplay, L("Filtre d'agrandissement de la fenêtre", "Window scaling filter"), L("Quand l'image est plus petite que la fenêtre.", "When the picture is smaller than the window."), "Upscale", (0, L("Simple", "Simple")), (1, "Catmull-Rom"), (2, "Lanczos"));
+        SwitchRow(RowsDisplay, L("NVIDIA DLSS (cartes RTX)", "NVIDIA DLSS (RTX cards)"),
+                  L("Le jeu est reconstruit avec le SDK DLSS, téléchargé chez NVIDIA. L'activer, c'est accepter la licence du SDK NVIDIA DLSS (github.com/NVIDIA/DLSS). Ensuite, choisissez DLSS ou DLAA dans le menu du jeu (touche Insert, Upscaler).",
+                    "The game is built again with the DLSS SDK, downloaded from NVIDIA. Turning this on accepts NVIDIA's DLSS SDK license (github.com/NVIDIA/DLSS). Then choose DLSS or DLAA in the game's menu (Insert key, Upscaler)."),
+                  out NvidiaDlss, out _);
 
         Sharpness = new Slider { Style = St("Line"), Minimum = 0, Maximum = 100, TickFrequency = 5, IsSnapToTickEnabled = true, Width = 210, LargeChange = 10, SmallChange = 5 };
         SharpnessText = new TextBlock { Width = 48, TextAlignment = TextAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Foreground = Res("BoneSoft") };
@@ -203,7 +212,16 @@ public partial class MainWindow
         OnSwitch(Audio, v => s.Audio = v);
         OnSwitch(Handheld, v => s.Handheld = v ? 1 : 0);
         OnSwitch(InvertY, v => s.InvertY = v);
+        OnSwitch(NvidiaDlss, v =>
+        {
+            s.NvidiaDlss = v;
+            // (turned on with a game installed: built again now, NVIDIA's SDK fetched first; off: the next build is without it)
+            var tools = Tools.Find();
+            if (v && tools != null && game == null && Game.Installed(s.Folder))
+                Dispatcher.BeginInvoke(() => Rebuild(tools, s.Folder));
+        });
         OnPick(ResolutionGroup, v => s.Resolution = v);
+        OnPick(UpscalerGroup, v => s.Upscaler = v);
         OnPick(UpscaleGroup, v => s.Upscaling = v);
         OnPick(FrameRateGroup, v => s.FrameRate = v);
         OnPick(SpeedGroup, v => s.GameSpeed = v);
@@ -231,7 +249,9 @@ public partial class MainWindow
         Audio.IsChecked = s.Audio;
         Handheld.IsChecked = s.Handheld != 0;
         InvertY.IsChecked = s.InvertY;
+        NvidiaDlss.IsChecked = s.NvidiaDlss;
         Pick(ResolutionGroup, s.Resolution);
+        Pick(UpscalerGroup, s.Upscaler);
         Pick(UpscaleGroup, s.Upscaling);
         Pick(FrameRateGroup, s.FrameRate);
         Pick(FramegenGroup, s.FrameGeneration);
@@ -251,6 +271,9 @@ public partial class MainWindow
         SpeedGroup.IsEnabled = s.FrameRate == 0;
         Pick(SpeedGroup, s.FrameRate != 0 ? 1 : s.GameSpeed);
         FramePacing.IsEnabled = s.FrameGeneration != 0;
+        // (NVIDIA DLSS and DLAA to choose only in a game built with them: the NVIDIA DLSS switch)
+        foreach (var r in Radios(UpscalerGroup))
+            if ((int)r.Tag is 1 or 2) r.Visibility = s.NvidiaDlss || s.Upscaler is 1 or 2 ? Visibility.Visible : Visibility.Collapsed;
         // (frame generation fills the display's own refresh: no switch to 60 Hz then)
         Display60.IsEnabled = display60Possible && s.FrameGeneration < 2;
         if (view is View.Home or View.Ready) MainNote.Text = PlaySummary();

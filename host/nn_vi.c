@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include "hos_sdl.h"
+#endif
 
 void hos_system_event_init(uint64_t key, int autoclear);   /* nn_os_sync.c */
 void hos_system_event_signal(uint64_t key);
@@ -108,9 +111,8 @@ static int display_hz(void) {
         dm.dmSize = sizeof dm;
         hz = EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1 ? (int)dm.dmDisplayFrequency : 60;
 #else
-        /* (linux) SDL's desktop mode carries the refresh rate, but this build asks it through host/hos_sdl.c's
-           dlopen'd library and has no call for it yet: 60, the game's own rate, unless HOS_FPS_MAX says more */
-        hz = 60;
+        hz = hos_sdl_desktop_hz();
+        if (hz <= 1) hz = 60;
 #endif
         hz = hz < 60 ? 60 : hz > 240 ? 240 : hz;
     }
@@ -120,7 +122,7 @@ static int fps_max(void) {
     int rx_option(int id, int otherwise);
     static int env = -1;
     if (env < 0) env = getenv("HOS_FPS_MAX") ? atoi(getenv("HOS_FPS_MAX")) : 0;
-    static int unlocked = -1;   /* (relink, on upstream: HOS_FPS_UNLOCKED=1 only; option 4 is the pads' row there) */
+    static int unlocked = -1;   /* (relink: HOS_FPS_UNLOCKED=1, or the menu's row) */
     if (unlocked < 0) unlocked = getenv("HOS_FPS_UNLOCKED") && atoi(getenv("HOS_FPS_UNLOCKED")) != 0;
     (void)rx_option;
     if (!unlocked && env <= 60) return 60;

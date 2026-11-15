@@ -110,6 +110,14 @@ static LONG WINAPI report_crash(EXCEPTION_POINTERS *info) {
             rec->NumberParameters > 1 && rec->ExceptionInformation[0] == 1 ? "write" : "read",
             (unsigned long long)addr, (unsigned long long)(addr - (uint64_t)A64_MEM), base ? base + 1 : name,
             (unsigned long long)(rip - (uint64_t)mod));
+    /* (relink, issue 26) A write to guest 0 + 0x268 bytes at start-up: the game's own allocator had returned null (a 0x268-byte
+       object at 0x80c4afa0, then its memset), before the first area; why is not known yet. Its own code does not check: said
+       here what such a crash usually means, for the player and for us */
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters > 1 && addr >= (uint64_t)A64_MEM &&
+        addr - (uint64_t)A64_MEM < 0x100000)
+        hos_log("CRASH: the game used a null pointer (guest %#llx): its memory ran out or one of its files could not be read "
+                "as expected. Check the game files (a fresh dump, installed again) and keep the game folder on a local disk",
+                (unsigned long long)(addr - (uint64_t)A64_MEM));
 #ifdef _WIN32
     {   /* the host stack from the faulting frame (x64 unwind data), as module+offset (nx2/samap.py maps mkw.exe's) */
         CONTEXT ctx = *info->ContextRecord;

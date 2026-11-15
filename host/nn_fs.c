@@ -34,6 +34,22 @@ static void mount(const char *name, const char *root, int writable) {
     ReleaseSRWLockExclusive(&mount_lock);
     if (writable) CreateDirectoryA(root, NULL);
     hos_log("fs: mounted %s: -> %s", name, root);
+#ifdef _WIN32   /* (a Windows path pattern: the log line would mislead elsewhere) */
+    if (!writable && !strcmp(name, "content")) {
+        /* (relink, issue 26) Which version the RomFS is, by its resource size table's name (the supported build's says
+           Product.111): a game that died in its first second gave no other trace of the files it read */
+        char pattern[MAX_PATH];
+        WIN32_FIND_DATAA fd;
+        snprintf(pattern, sizeof pattern, "%s\\System\\Resource\\ResourceSizeTable*", root);
+        HANDLE f = FindFirstFileA(pattern, &fd);
+        if (f == INVALID_HANDLE_VALUE) {
+            hos_log("fs: the RomFS has no System\\Resource\\ResourceSizeTable file: the game files are incomplete");
+        } else {
+            hos_log("fs: RomFS resource table %s (%lu bytes)", fd.cFileName, (unsigned long)fd.nFileSizeLow);
+            FindClose(f);
+        }
+    }
+#endif
 }
 
 int hos_mods_romfs(const char *rel, char *out, size_t cap);   /* mods.c */

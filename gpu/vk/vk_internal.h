@@ -123,6 +123,8 @@ bool memory_wb_flush_own();
 /// The game made a memory pool (gpu address, bytes): imported in the background, before it is used
 /// RX_VK_CHECKPOINTS: the draws the GPU reached, logged once the device is lost (vk_draw.cpp)
 void checkpoints_report();
+/// The GPU finished nothing for that long while work waited on it (issue 7): the markers, once a run (vk_draw.cpp)
+void gpu_stall_report(double seconds, uint64_t done, uint64_t waited);
 /// VK_AMD_buffer_marker's buffer, for RX_VK_CHECKPOINTS on a device without the NV checkpoints (vk_draw.cpp)
 void buffer_markers_init();
 void coopmat_init();   // vk_coopmat.cpp (once the device is made)

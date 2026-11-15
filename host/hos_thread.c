@@ -1307,7 +1307,7 @@ static void vc_acquire(HosThread *t) {
     int spun = 0;
     if (esc_better < 0) {
         spin_ns = vc_env_ns("HOS_VCORE_SPIN_US", 0);
-        /* (2 s, as upstream since 07b03596: an escape runs a thread with no core while the holder still runs on it, so it
+        /* (2 s: an escape runs a thread with no core while the holder still runs on it, so it
            is only a deadlock breaker; 250 ms before, reached 20-34 times at every start while the opening movie plays) */
         esc_eq = vc_env_ns("HOS_VCORE_ESCAPE_EQ_US", 2000000);
         esc_better = vc_env_ns("HOS_VCORE_ESCAPE_US", 2000000);
@@ -1440,7 +1440,7 @@ static void vc_yield(HosThread *t, int strict) {
 /* 1 when the caller is to take a core again after its block (hos_vcore_back): it gave its core up, or it has run without
    one since an escape. An escape lasts until the thread's next block, as every other thread waits for a core after one;
    it took none again before, so an escaped thread ran with no core, and the core number of a core another thread held,
-   for the rest of its life (upstream issue 1929, its fix c8b9a9f0 brought here on 12/11).
+   for the rest of its life (fixed here on 12/11).
    (relink) What it did to OoT: the threads that escape do so while the opening movie plays (its decoder and the audio
    thread hold cores for more than the escape time), a different set at every start. With OptimizeChangeBanc or
    ParallelDecompThread among them, that background thread ran for the whole session beside the six cores' threads instead

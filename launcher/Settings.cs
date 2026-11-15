@@ -46,9 +46,12 @@ sealed class Settings
 {
     // the game's rows (gpu/vk/vk_menu.cpp: ini keys are the row names, lower case, spaces as underscores)
     public int Fullscreen = 1, FrameGeneration = 0, FramePacing = 0, FrameRate = 0, Resolution = 1, Upscaling = 0, Sharpness = 0,
-               GameSpeed = 0, Handheld = 0, Ultrawide = 0, FpsCounter = 0;
+               GameSpeed = 0, Handheld = 0, Ultrawide = 0, FpsCounter = 0,
+               Upscaler = 0;   // (the game's Upscaler row, saved as dlss: 0 the game's own, 1 NVIDIA DLSS, 2 NVIDIA DLAA, 3 AMD FSR, 4 AMD FSR native AA)
     // the launcher's
     public bool Display60 = true, Audio = true, InvertY = false;
+    /// The game built with NVIDIA DLSS: NVIDIA's DLSS SDK fetched from NVIDIA at each build, its license accepted by ticking it
+    public bool NvidiaDlss = false;
     /// The launcher's own language: en (the default) or fr (Texts.cs reads it when the launcher opens)
     public string UiLanguage = Texts.French ? "fr" : "en";
     public string Language = Texts.GameLanguageOfWindows();
@@ -100,6 +103,7 @@ sealed class Settings
         s.Display60 = Bool(l, "display_60hz", true);
         s.Audio = Bool(l, "audio", true);
         s.InvertY = Bool(l, "invert_y", false);
+        s.NvidiaDlss = Bool(l, "nvidia_dlss", false);
         if (l.TryGetValue("ui_language", out var ui) && ui is "en" or "fr") s.UiLanguage = ui;
         var here = AppContext.BaseDirectory.TrimEnd('\\', '/');
         var candidates = new[]
@@ -130,6 +134,7 @@ sealed class Settings
         Handheld = Int(g, "handheld_profile", 0, 0, 1);
         Ultrawide = Int(g, "ultrawide", 0, 0, 1);
         FpsCounter = Int(g, "fps_counter", 0, 0, 1);
+        Upscaler = Int(g, "dlss", 0, 0, 4);
         other.Clear();
         foreach (var (k, v) in g)
             if (!Known.Contains(k)) other[k] = v;
@@ -150,7 +155,7 @@ sealed class Settings
     static readonly HashSet<string> Known = new(StringComparer.OrdinalIgnoreCase)
     {
         "fullscreen", "frame_generation", "frame_pacing", "frame_rate", "resolution", "upscaling", "sharpness", "game_speed",
-        "handheld_profile", "ultrawide", "fps_counter",
+        "handheld_profile", "ultrawide", "fps_counter", "dlss",
     };
 
     public void Save()
@@ -160,6 +165,7 @@ sealed class Settings
         sb.AppendLine($"display_60hz={(Display60 ? 1 : 0)}");
         sb.AppendLine($"audio={(Audio ? 1 : 0)}");
         sb.AppendLine($"invert_y={(InvertY ? 1 : 0)}");
+        sb.AppendLine($"nvidia_dlss={(NvidiaDlss ? 1 : 0)}");
         sb.AppendLine($"ui_language={UiLanguage}");
         sb.AppendLine($"game_folder={Folder}");
         Directory.CreateDirectory(Storage.Base);
@@ -179,6 +185,7 @@ sealed class Settings
         Row("handheld_profile", Handheld);
         Row("ultrawide", Ultrawide);
         Row("fps_counter", FpsCounter);
+        Row("dlss", Upscaler);
         foreach (var (k, v) in other) g.Append(k).Append('=').Append(v).Append('\n');
         File.WriteAllText(GameIni, g.ToString());
 

@@ -80,7 +80,7 @@ def main():
 
     top = sorted(os.listdir(root))
     builder_files = [n for n in top if os.path.isfile(os.path.join(root, n)) and
-                     (n.startswith("ReLink") or n in ("LICENSE", "README.txt"))]   # (ReLink-Setup.exe too: Repair runs it)
+                     (n.startswith("ReLink") or n in ("LICENSE", "NOTICE.md", "README.txt"))]   # (ReLink-Setup.exe too: Repair runs it)
     runtime_files = [n for n in top if os.path.isfile(os.path.join(root, n)) and n not in builder_files]
     runtime_dirs = [n for n in top if os.path.isdir(os.path.join(root, n)) and n != "tools"]
     tools = sorted(os.listdir(os.path.join(root, "tools")))

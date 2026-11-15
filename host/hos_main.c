@@ -363,18 +363,31 @@ static const char *saves_dir(const char *beside) {
    before the window, so HOS_HEADLESS and HOS_WINDOW_SIZE are already set when the window is made.
    HOS_ENV_FILE=<path> reads that file instead: a scripted or A/B test run brings its own switches and leaves the
    player's relink_env.txt as it is. */
+/* (relink, issue 7) what the file gave, for the log's second line: a player could not tell whether the file was read
+   ("idk if it's doing something or not"). Kept here: the log is opened after the file is read */
+static char relink_env_note[1024];
 static void load_relink_env(void) {
     char path[MAX_PATH + 32];
     const char *other = getenv("HOS_ENV_FILE");
+    FILE *f = NULL;
     if (other && *other) {
         snprintf(path, sizeof path, "%s", other);
+        f = fopen(path, "r");
     } else {
         DWORD n = hos_game_path_a(path, MAX_PATH);
         while (n && path[n - 1] != 92 && path[n - 1] != 47) n--;
-        memcpy(path + n, "relink_env.txt", 17);
+        memcpy(path + n, "relink_env.txt", sizeof "relink_env.txt");
+        f = fopen(path, "r");
+        /* (Notepad with the extensions hidden saves "relink_env.txt" as relink_env.txt.txt: taken too) */
+        if (!f) memcpy(path + n, "relink_env.txt.txt", sizeof "relink_env.txt.txt"), f = fopen(path, "r");
     }
-    FILE *f = fopen(path, "r");
-    if (!f) return;
+    if (!f) {
+        snprintf(relink_env_note, sizeof relink_env_note, "env: no relink_env.txt beside the game (none read)");
+        return;
+    }
+    const char *base = path + strlen(path);
+    while (base > path && base[-1] != 92 && base[-1] != 47) base--;
+    int used = snprintf(relink_env_note, sizeof relink_env_note, "env: %s read:", base), count = 0;
     char line[512];
     while (fgets(line, sizeof line, f)) {
         char *s = line;
@@ -383,6 +396,9 @@ static void load_relink_env(void) {
         size_t len = strlen(s);
         while (len && (s[len - 1] == 10 || s[len - 1] == 13 || s[len - 1] == ' ' || s[len - 1] == 9)) s[--len] = 0;
         if (!len || *s == '#' || !strchr(s, '=')) continue;
+        if (used > 0 && used < (int)sizeof relink_env_note - 1)
+            used += snprintf(relink_env_note + used, sizeof relink_env_note - (size_t)used, " %s", s);
+        count++;
 #ifdef _WIN32
         _putenv(s);
 #else
@@ -392,6 +408,7 @@ static void load_relink_env(void) {
 #endif
     }
     fclose(f);
+    if (!count) snprintf(relink_env_note + used, sizeof relink_env_note - (size_t)used, " no NAME=VALUE line");
 }
 
 int hos_oot_protect_hearts;
@@ -1229,7 +1246,7 @@ static int game_main(int argc, char **argv) {
     const char *protect_hearts = getenv("HOS_OOT_PROTECT_HEARTS");
     hos_oot_protect_hearts = protect_hearts && !strcmp(protect_hearts, "1");
     {   // (the whole process, not only the window's thread: the renderer asks the window's size from its own, and on a 4K screen at 150%
-        // Windows answered such a thread 2560 x 1440: the picture was that size, in the corner of the window. upstream issues 15, 18, 20)
+        // Windows answered such a thread 2560 x 1440: the picture was that size, in the corner of the window)
         typedef BOOL(WINAPI * SetAware)(void *);
         SetAware set = (SetAware)(void *)GetProcAddress(GetModuleHandleA("user32.dll"), "SetProcessDpiAwarenessContext");
         if (set && !getenv("HOS_DPI_UNAWARE")) set((void *)(intptr_t)-4);
@@ -1267,6 +1284,7 @@ static int game_main(int argc, char **argv) {
         }
     }
     hos_log("Project ReLink %s", RELINK_VERSION);   /* (the log's first line: which build a report comes from) */
+    if (relink_env_note[0]) hos_log("%s", relink_env_note);
     const char *image = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--romfs") && i + 1 < argc) hos_romfs_dir = argv[++i];

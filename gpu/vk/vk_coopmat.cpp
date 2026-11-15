@@ -334,7 +334,7 @@ bool test_multiply() {
 namespace {
 /// Without cooperative matrices (a GTX 1650, an RTX 2060 on some drivers, AMD and Intel cards): the same multiplies in a shader function on
 /// subgroup shuffles. The lowering refuses a matrix multiply it has no way to run, and the game's upscaling networks were then left out:
-/// the 3D scene came out black or as coloured noise, with the HUD over it (upstream issues 10 and 14)
+/// the 3D scene came out black or as coloured noise, with the HUD over it
 void software_multiplies(const char* why) {
     Shader::Backend::SPIRV::mma_software = true;
     dev.native_mma = true;
