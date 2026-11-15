@@ -17,6 +17,7 @@ here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ["RELINK_NO_SEARCH"] = "1"   # (the search is not what this tests, and it would walk the runner's disk)
 
 from PySide6.QtWidgets import QApplication
 

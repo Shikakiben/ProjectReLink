@@ -7,9 +7,12 @@
 import glob
 import math
 import os
+import re
 import queue
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import webbrowser
 
@@ -41,6 +44,7 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, Q
 #  beside this file have to be put there. Without this the AppImage dies on "No module named 'scene'".)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import finder
 import scene
 import theme as T
 import updates
@@ -77,9 +81,10 @@ def display(size, weight=QFont.Weight.Normal):
 
 
 def label(text, size=13, weight=QFont.Weight.Normal, color="Ink", wrap=False):
+    """color: a key of theme.C, or a colour of its own (the launcher's warm greys are not in the Slate palette)."""
     w = QLabel(text)
     w.setFont(font(size, weight))
-    w.setStyleSheet("color: %s; background: transparent;" % css(C[color]))
+    w.setStyleSheet("color: %s; background: transparent;" % css(C[color] if color in C else QColor(color)))
     if wrap:
         w.setWordWrap(True)
     return w
@@ -353,6 +358,14 @@ class StepRow(QWidget):
         p.end()
 
 
+def _why(text):
+    """launcher/Install.cs's Why: the tools' own words, keeping the build ids."""
+    m = re.search(r"^This is build (\w+)\. \w+ supports build (\w+)\.$", text.strip())
+    if m:
+        return "This is build %s of the game; ReLink needs build %s." % (m.group(1), m.group(2))
+    return text
+
+
 def time_left(seconds):
     """The launcher's own wording (launcher/Install.cs: TimeLeft), with its tail."""
     tail = " Your PC stays usable."
@@ -362,6 +375,94 @@ def time_left(seconds):
     if minutes >= 60:
         return "About %d h %d min left.%s" % (minutes // 60, minutes % 60, tail)
     return "About %d minute%s left.%s" % (minutes, "" if minutes == 1 else "s", tail)
+
+
+class FileRow(QWidget):
+    """One .nup found on this PC, as launcher/App.xaml's FileRow: a hairline under it, the launcher's warm text, a gold
+    bar down its left side when it is the one chosen, and on the right whether the game inside it is the version ReLink
+    can build. Clicking it chooses it."""
+
+    RULE = "#22EFE6D0"
+    HOVER = "#10EFE6D0"
+    CHOSEN = "#16EFE6D0"
+    GOOD = "#8FD09A"     # (launcher/Install.cs's own green for a supported copy)
+
+    def __init__(self, dump, on_click):
+        super().__init__()
+        self.path = dump["path"]
+        self.where = dump["where"]
+        self.size = dump["size"]
+        self.modified = dump["modified"]
+        self.state = "checking"      # checking / ok / bad / unreadable
+        self.why = ""
+        self.chosen = False
+        self.hover = False
+        self.on_click = on_click
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(76 if self.why else 58)
+
+    def set_state(self, state, why=""):
+        self.state, self.why = state, why
+        self.setFixedHeight(76 if why else 58)
+        self.update()
+
+    def set_chosen(self, chosen):
+        self.chosen = chosen
+        self.update()
+
+    def enterEvent(self, e):
+        self.hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self.hover = False
+        self.update()
+
+    def mousePressEvent(self, e):
+        self.on_click(self)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # the ground, the hairline under it, and the gold bar of the chosen one
+        if self.chosen:
+            p.fillRect(self.rect(), QColor(self.CHOSEN))
+            p.fillRect(QRectF(0, 2, 3, h - 4), QColor(Staff.GOLD))
+        elif self.hover:
+            p.fillRect(self.rect(), QColor(self.HOVER))
+        p.setPen(QPen(QColor(self.RULE), 1))
+        p.drawLine(QPointF(0, h - 0.5), QPointF(w, h - 0.5))
+
+        # the name, and where it came from
+        name_font = font(15)
+        fm = QFontMetrics(name_font)
+        p.setFont(name_font)
+        p.setPen(QColor(Staff.BONE))
+        p.drawText(QPointF(14, 10 + fm.ascent()), os.path.basename(self.path))
+        small = font(12)
+        fm2 = QFontMetrics(small)
+        p.setFont(small)
+        p.setPen(QColor(Staff.BONE_FAINT))
+        meta = "%s, %s, %s" % (self.where, finder.size_text(self.size), finder.ago(self.modified))
+        p.drawText(QPointF(14, 10 + fm.ascent() + 3 + fm2.ascent()), meta)
+        if self.why:
+            p.setPen(QColor(Staff.WARN))
+            p.drawText(QPointF(14, 10 + fm.ascent() + 3 + fm2.ascent() + 3 + fm2.ascent()), self.why)
+
+        # and, on the right, what the game inside it is
+        state, colour = {
+            "checking": ("Checking…", Staff.BONE_FAINT),
+            "ok": ("Supported version", self.GOOD),
+            "bad": ("Not the supported version", Staff.WARN),
+            "unreadable": ("Can't be read", Staff.WARN),
+        }[self.state]
+        p.setFont(font(13))
+        p.setPen(QColor(colour))
+        p.drawText(QRectF(0, 10, w - 6, fm.height()),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, state)
+        p.end()
 
 
 class Window(QWidget):
@@ -376,6 +477,10 @@ class Window(QWidget):
         self.out = ""
         self.stage_id = None
         self.log_shown = False
+        self.dump_q = queue.Queue()      # (the search's finds, from its thread)
+        self.check_q = queue.Queue()     # (each file's build id, from the check's thread)
+        self.space_q = queue.Queue()     # (the free space under the install folder)
+        self.probe = os.path.join(tempfile.gettempdir(), "relink-probe")
         self.files_changed = -1
         self.files_of = 0
         self.files_compiled = 0
@@ -490,63 +595,69 @@ class Window(QWidget):
 
         head = QHBoxLayout()
         head.setSpacing(10)
-        head.addWidget(label("Install the game", 15, T.W_SEMIBOLD, "Ink"))
+        setup_title = QLabel("Install the game")
+        setup_title.setFont(display(27))          # (the same serif and size as "Installing the game")
+        setup_title.setStyleSheet("color: %s; background: transparent;" % css(C["Ink"]))
+        head.addWidget(setup_title, 0, Qt.AlignmentFlag.AlignVCenter)
         head.addStretch(1)
-        head.addWidget(Chip("built from your own copy", "Go", "GoSoft"))
+        head.addWidget(Chip("built from your own copy", "Go", "GoSoft"), 0, Qt.AlignmentFlag.AlignVCenter)
         s0.addLayout(head)
+        s0.addWidget(label("ReLink builds the game on this PC from your own copy. It happens once and takes 10 to 45 "
+                           "minutes.", 14, QFont.Weight.Normal, "InkSoft", wrap=True))
         s0.addWidget(hairline())
 
-        # ---- 1. the game ----
-        s0.addWidget(label("YOUR COPY OF THE GAME", 10, T.W_SEMIBOLD, "InkFaint"))
-        s0.addWidget(label("A .nup file, or the romfs and exefs folders.", 11, QFont.Weight.Normal, "InkFaint"))
+        # ---- 1. the game: the .nup files found on this PC, as the launcher lists them ----
+        s0.addWidget(label("YOUR COPY OF THE GAME", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
+        self.dumps_hint = label("Looking for .nup files…", 12, QFont.Weight.Normal, Staff.BONE_FAINT)
+        s0.addWidget(self.dumps_hint)
 
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        self.tick_nup = T.Tick("A .nup file", True)
-        self.tick_nup.clicked.connect(lambda: self.choose("nup"))
-        self.edit_nup = PathEdit()
-        self.edit_nup.setReadOnly(True)
-        self.edit_nup.setPlaceholderText("none chosen")
-        row.addWidget(self.tick_nup, 0)
-        row.addWidget(self.edit_nup, 1)
-        b = Button("Choose…", "quiet")
-        b.clicked.connect(self.pick_nup)
-        row.addWidget(b)
-        s0.addLayout(row)
+        self.dumps_box = QWidget()
+        self.dumps_list = QVBoxLayout(self.dumps_box)
+        self.dumps_list.setContentsMargins(0, 2, 0, 2)
+        self.dumps_list.setSpacing(0)
+        s0.addWidget(self.dumps_box)
+        self.rows_by_path = {}
 
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        self.tick_dirs = T.Tick("The romfs and exefs folders", False)
-        self.tick_dirs.clicked.connect(lambda: self.choose("folders"))
-        self.edit_dirs = PathEdit()
-        self.edit_dirs.setReadOnly(True)
-        self.edit_dirs.setPlaceholderText("none chosen")
-        row.addWidget(self.tick_dirs, 0)
-        row.addWidget(self.edit_dirs, 1)
-        b = Button("Choose…", "quiet")
-        b.clicked.connect(self.pick_dirs)
-        row.addWidget(b)
-        s0.addLayout(row)
+        # (the folders, when the player has them, sit where the launcher puts its note)
+        self.folders_row = label("", 12, QFont.Weight.Normal, Staff.BONE)
+        self.folders_row.setWordWrap(True)
+        self.folders_row.hide()
+        s0.addWidget(self.folders_row)
+
+        # (always there, whatever the search did or could not do)
+        links = QHBoxLayout()
+        links.setSpacing(22)
+        choose_nup = Button("Choose a .nup file…", "link")
+        choose_nup.clicked.connect(self.pick_nup)
+        links.addWidget(choose_nup)
+        choose_dirs = Button("Choose the romfs and exefs folders…", "link")
+        choose_dirs.clicked.connect(self.pick_dirs)
+        links.addWidget(choose_dirs)
+        links.addStretch(1)
+        s0.addLayout(links)
 
         s0.addWidget(hairline())
 
         # ---- 2. where ----
-        s0.addWidget(label("WHERE THE GAME IS BUILT", 10, T.W_SEMIBOLD, "InkFaint"))
+        s0.addWidget(label("INSTALL FOLDER", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
         row = QHBoxLayout()
         row.setSpacing(10)
         self.edit_out = PathEdit()
         self.edit_out.setReadOnly(True)
+        self.edit_out.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.edit_out.setPlaceholderText("none chosen")
         row.addWidget(self.edit_out, 1)
-        b = Button("Choose…", "quiet")
+        b = Button("Change…", "quiet")
         b.clicked.connect(self.pick_out)
         row.addWidget(b)
         s0.addLayout(row)
+        self.space_note = label("", 12, QFont.Weight.Normal, Staff.BONE_FAINT, wrap=True)
+        s0.addWidget(self.space_note)
 
         s0.addWidget(hairline())
 
         # ---- 3. language ----
-        s0.addWidget(label("THE GAME'S LANGUAGE", 10, T.W_SEMIBOLD, "InkFaint"))
+        s0.addWidget(label("THE GAME'S LANGUAGE", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
         row = QHBoxLayout()
         row.setSpacing(10)
         self.lang = Choice()
@@ -588,7 +699,7 @@ class Window(QWidget):
         self.log.setReadOnly(True)
         self.log.setFont(font(12, family=T.MONO))
         self.log.setStyleSheet(
-            "QPlainTextEdit { color: %s; background: rgba(0,0,0,60); border: 1px solid rgba(255,255,255,18);"
+            "QPlainTextEdit { color: %s; background: rgba(0,0,0,26); border: 1px solid rgba(255,255,255,18);"
             " border-radius: 8px; padding: 10px; selection-background-color: %s; }"
             "QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }"
             "QScrollBar::handle:vertical { background: rgba(255,255,255,40); border-radius: 3px; min-height: 24px; }"
@@ -615,7 +726,11 @@ class Window(QWidget):
 
         page.addWidget(panel, 1)
 
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # (nothing is focused on open: no ring on a button nobody asked for)
+        self.setFocus()
+        self.show_page(0)   # (the setup page's own state: output closed, Cancel absent)
         self.refresh()
+        self.start_search()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_tick)
         self.timer.start(100)
@@ -644,9 +759,9 @@ class Window(QWidget):
         # (the three rows stay: they say what is being installed while it installs, as the launcher's build page does)
         self.idle_box.setVisible(not building)
         self.build_box.setVisible(building)
-        self.details.setVisible(building)
-        self.cancel_link.setVisible(building)
-        self.log.setVisible(not building or self.log_shown)
+        self.details.setVisible(True)              # ("Show details" is offered on both pages)
+        self.cancel_link.setVisible(building)      # (Cancel only means something while a build runs)
+        self.log.setVisible(self.log_shown)        # (closed until asked for: it took the whole page)
 
     def toggle_log(self):
         self.log_shown = not self.log_shown
@@ -684,34 +799,103 @@ class Window(QWidget):
         else:
             row.small_text("%d of %d changed files" % (self.files_compiled, self.files_changed))
 
-    # ---- the fields ----
-    def choose(self, which):
-        self.src = which
-        self.tick_nup.setChecked(which == "nup")
-        self.tick_dirs.setChecked(which == "folders")
+    # ---- the player's copy ----
+    def start_search(self):
+        """Look for .nup files in the background and check each one's build id as it turns up.
+
+        Nothing here may fail in the player's face: a machine where the search cannot run just shows the hint and the
+        two "choose" links."""
+        if not finder.enabled():
+            self.dumps_hint.setText("Choose your .nup below.")
+            return
+        threading.Thread(target=self._search, daemon=True).start()
+
+    def _search(self):
+        try:
+            def found(dump):
+                self.dump_q.put(dump)
+            finder.find_dumps(on_found=found)
+        except Exception:
+            pass
+        finally:
+            self.dump_q.put(None)   # (the walk is over, whatever happened)
+
+    def _check_one(self, path):
+        """Ask make_game.py what build is inside one file: about two seconds, only its exefs is unpacked."""
+        if not os.access(PY, os.X_OK) or not os.path.isfile(MK):
+            return "unreadable", ""
+        try:
+            r = subprocess.run([PY, "-I", MK, "--check", "--nup", path, "--work", self.probe],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+        except (OSError, subprocess.SubprocessError):
+            return "unreadable", ""
+        for line in (r.stdout or "").splitlines():
+            if line.startswith("@@check "):
+                _, _, rest = line.partition(" ")
+                verdict, _, text = rest.partition(" ")
+                if verdict == "ok":
+                    return "ok", ""
+                if verdict == "bad":
+                    return "bad", _why(text)
+        return "unreadable", ""
+
+    def _check_thread(self, paths):
+        for path in paths:
+            state, why = self._check_one(path)
+            self.check_q.put((path, state, why))
+        self.check_q.put(None)
+
+    def add_dump(self, dump):
+        row = FileRow(dump, self.select_row)
+        self.rows_by_path[dump["path"]] = row
+        self.dumps_list.addWidget(row)
+        self.dumps_hint.hide()
+
+    def select_row(self, row):
+        self.nup = row.path
+        self.romfs = self.exefs = ""
+        self.folders_row.hide()
+        self.src = "nup"
+        self.mark_chosen()
         self.refresh()
+
+    def mark_chosen(self):
+        for path, row in self.rows_by_path.items():
+            row.set_chosen(self.src == "nup" and path == self.nup)
 
     def pick_nup(self):
         p, _ = QFileDialog.getOpenFileName(self, "Your .nup file", os.path.expanduser("~"),
                                           "Game dump (*.nup);;All files (*)")
-        if p:
-            self.nup = p
-            self.edit_nup.setText(p)
-            self.edit_nup.setCursorPosition(0)
-            self.choose("nup")
+        if not p:
+            return
+        self.nup, self.romfs, self.exefs, self.src = p, "", "", "nup"
+        if p in self.rows_by_path:                 # (a file the search did not reach: give it a row of its own)
+            self.mark_chosen()
+        else:
+            try:
+                stat = os.stat(p)
+                dump = {"path": p, "where": "Chosen", "size": stat.st_size, "modified": stat.st_mtime}
+            except OSError:
+                dump = {"path": p, "where": "Chosen", "size": 0, "modified": 0}
+            self.add_dump(dump)
+            self.rows_by_path[p].set_state("checking")
+            threading.Thread(target=self._check_thread, args=([p],), daemon=True).start()
+            self.rows_by_path[p].set_chosen(True)
+        self.folders_row.hide()
+        self.refresh()
 
     def pick_dirs(self):
         p = QFileDialog.getExistingDirectory(self, "The romfs folder", os.path.expanduser("~"))
         if not p:
             return
-        self.romfs = p
         q = QFileDialog.getExistingDirectory(self, "The exefs folder", os.path.expanduser("~"))
         if not q:
             return
-        self.exefs = q
-        self.edit_dirs.setText(self.romfs + "   +   " + self.exefs)
-        self.edit_dirs.setCursorPosition(0)
-        self.choose("folders")
+        self.romfs, self.exefs, self.src = p, q, "folders"
+        self.folders_row.setText("The romfs and exefs folders: %s   +   %s" % (self.romfs, self.exefs))
+        self.folders_row.show()
+        self.mark_chosen()
+        self.refresh()
 
     def pick_out(self):
         p = QFileDialog.getExistingDirectory(self, "Where the game is built (a ReLink folder is made inside)",
@@ -720,7 +904,17 @@ class Window(QWidget):
             self.out = os.path.join(p, "ReLink")
             self.edit_out.setText(self.out)
             self.edit_out.setCursorPosition(0)
+            threading.Thread(target=self._free_space, daemon=True).start()
             self.refresh()
+
+    def _free_space(self):
+        try:
+            os.makedirs(self.out, exist_ok=True)
+            free = shutil.disk_usage(self.out).free
+            self.space_q.put("The install needs 6 GB free while it works; %s has %s."
+                             % (self.out, finder.size_text(free)))
+        except OSError:
+            self.space_q.put("")
 
     def open_folder(self):
         if self.out and os.path.isdir(self.out):
@@ -818,9 +1012,47 @@ class Window(QWidget):
 
     def on_tick(self):
         self.drain()
+        self.drain_search()
         if self.proc:
             for row in self.step_rows.values():
                 row.tick(0.1)
+
+    def drain_search(self):
+        """The search's finds, then each file's build id, then the free space: all from their own threads."""
+        try:
+            while True:
+                dump = self.dump_q.get_nowait()
+                if dump is None:
+                    if not self.rows_by_path:
+                        self.dumps_hint.setText("No .nup file found in Downloads, Desktop, Documents or the disks. "
+                                                "Choose yours below.")
+                    else:
+                        self.dumps_hint.hide()
+                        threading.Thread(target=self._check_thread,
+                                         args=(list(self.rows_by_path),), daemon=True).start()
+                    break
+                self.add_dump(dump)
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                item = self.check_q.get_nowait()
+                if item is None:
+                    break
+                path, state, why = item
+                if path in self.rows_by_path:
+                    self.rows_by_path[path].set_state(state, why)
+                # (the first copy that checks out is the one chosen, as the launcher does: the player can click another)
+                if state == "ok" and not self.nup and self.src == "nup":
+                    self.select_row(self.rows_by_path[path])
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                note = self.space_q.get_nowait()
+                self.space_note.setText(note)
+        except queue.Empty:
+            pass
 
     def drain(self):
         try:
