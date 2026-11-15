@@ -722,21 +722,27 @@ std::atomic<int64_t> pcache_built_since_save{0};
 // instead of 27-30, hard-fault reads mostly 0 instead of thousands a second; the third area 55.9 fps with one 0.6 s stall
 // instead of 36-51 with 0.9-1.4 s ones (hs1902 against hs1890-1896); 0.0-0.1 draws a frame left out for a pipeline.
 // RX_VK_LEAN_PIPELINES=0 / 1 chooses; RX_VK_PRECOMPILE set (either way) means the full cache and that choice, as before.
+//
+// (relink, 15/11, 0.7.6) LEAN ON EVERY PC. The freeze near water (issues 6, 7, 27, 35, 39, 46, 53: the picture stops, then the
+// device is lost, on RTX 20 to 50 cards) came in every log from a PC with 24 GB of RAM or more, that is from the full start;
+// the bench PC has 16 GB, ran lean, and never froze. With a player's save at Lake Hylia (issue 7) and the full start forced
+// there (RX_VK_LEAN_PIPELINES=0, RTX 3060 Ti, 100 % render): the device lost at frame 2925 and at frame 3147, two starts of
+// two, a draw of the scene's lit programs running each time; lean, the same save and the same moves: 130 s in the water and
+// nothing lost (hs3103, hs3105 against hs3104). Why the full start ends there is not known yet. Lean is also what every
+// measure and validation of this port was made with. RX_VK_LEAN_PIPELINES=0: the full start, as PCs with 20 GB and more
+// had it until 0.7.5.
 bool pipelines_lean() {
     static const bool lean = [] {
-        bool on = false;
-        if (const char* e = getenv("RX_VK_LEAN_PIPELINES")) {
-            on = atoi(e) != 0;
-        } else if (!getenv("RX_VK_PRECOMPILE")) {
-#ifdef _WIN32
-            MEMORYSTATUSEX ms{};
-            ms.dwLength = sizeof ms;
-            on = GlobalMemoryStatusEx(&ms) && ms.ullTotalPhys < (20ull << 30);
-#endif
-        }
+        bool on = true;
+        if (const char* e = getenv("RX_VK_LEAN_PIPELINES")) on = atoi(e) != 0;
+        else if (getenv("RX_VK_PRECOMPILE")) on = false;
         if (on)
-            logf("vk: lean pipelines (a PC with less than 20 GB of RAM, or RX_VK_LEAN_PIPELINES=1): no pipeline cache kept in memory, "
-                 "graphics pipelines made at their first draw, the compute pipelines play has used before the game (RX_VK_LEAN_PIPELINES=0: all before the game)");
+            logf("vk: lean pipelines: no pipeline cache kept in memory, graphics pipelines made at their first draw, the compute "
+                 "pipelines play has used before the game (RX_VK_LEAN_PIPELINES=0: all of them before the game, as PCs with 20 GB "
+                 "of RAM and more had until 0.7.5)");
+        else
+            logf("vk: full pipelines (RX_VK_LEAN_PIPELINES=0 or RX_VK_PRECOMPILE): every noted pipeline made before the game. "
+                 "This start froze near water on NVIDIA cards (issues 6 and 7)");
         return on;
     }();
     return lean;
