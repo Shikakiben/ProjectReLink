@@ -223,7 +223,14 @@ class Window:
             self.bar.configure(value=100)
             self.written("\n== done: %s ==\n" % game)
             if messagebox.askyesno("ReLink", "The game is built in\n%s\n\nPlay it now?" % self.out.get()):
-                subprocess.Popen([game], cwd=self.out.get())
+                # The builder's own variables are dropped: the built game loads relink_vk.so and libSDL2-2.0.so.0 from
+                # beside itself, and an LD_LIBRARY_PATH, APPDIR or PYTHON* left over from the AppImage can make it pick
+                # the image's copies instead. The same list the Longshot builder's longshot-launch drops.
+                env = {k: v for k, v in os.environ.items()
+                       if not (k.startswith(("RELINK_", "PYTHON", "APPDIR", "APPIMAGE", "ARGV0", "OWD"))
+                               or k == "LD_LIBRARY_PATH")}
+                env["RELINK_NO_UPDATE_CHECK"] = "1"   # (this folder was just built; the launcher's own check is not wanted)
+                subprocess.Popen([game], cwd=self.out.get(), env=env)
                 self.root.after(500, self.root.destroy)
         else:
             self.state.configure(text="The build did not finish.")
