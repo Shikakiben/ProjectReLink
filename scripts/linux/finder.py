@@ -9,6 +9,7 @@ build id inside it, which `make_game.py --check` reads in about two seconds — 
 """
 import datetime
 import os
+import sys
 import time
 
 DEADLINE = 6.0          # (seconds; a walk of a whole disk takes 16 s here, but a games folder is shallow and turns up
@@ -111,6 +112,20 @@ def _roots():
         except (OSError, ValueError):
             pass
     return out
+
+
+def title_ids(path):
+    """The title ids inside a .nup, read from its table of contents: no extraction, about a third of a second.
+
+    None when the file cannot be read, so a caller can tell "not this game" from "could not say"."""
+    try:
+        nx2 = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "nx2"))
+        if nx2 not in sys.path:
+            sys.path.insert(0, nx2)
+        import nup
+        return {t["id"] for t in nup.Nup(path).titles}
+    except Exception:
+        return None
 
 
 def size_text(n):

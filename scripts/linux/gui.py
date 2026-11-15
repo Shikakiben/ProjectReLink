@@ -67,6 +67,10 @@ LANGUAGES = [
 
 # The launcher maps a step's own 0..1 into its share of the whole build (launcher/Install.cs: Weight). It has a
 # "download" slot first that we do not have, so read starts at 0 here instead of 0.04; everything else is its numbers.
+# (the title id inside every .nup of this game: 0400486024dec000. A file with another one is another game, and is not
+#  listed at all — a player with fifteen dumps should not have to read fourteen lines about games this cannot build)
+OOT_TITLE = 0x0400486024DEC000
+
 STAGE_WEIGHT = {"read": (0.00, 0.08), "lift": (0.08, 0.14), "compile": (0.22, 0.74), "finish": (0.96, 0.04)}
 
 # the launcher's own display face (App.xaml: Palatino Linotype, Book Antiqua, Georgia), with what Linux has of it
@@ -662,8 +666,14 @@ class Window(QWidget):
         self.dumps_list.setSpacing(0)
         s0.addWidget(self.dumps_box)
         self.rows_by_path = {}
+        self.pending = []          # (the search's finds, before they are identified)
+        self.others = 0            # (how many .nup files were another game)
 
         # (the folders, when the player has them, sit where the launcher puts its note)
+        self.others_note = label("", 12, QFont.Weight.Normal, Staff.BONE_FAINT)
+        self.others_note.hide()
+        s0.addWidget(self.others_note)
+
         self.folders_row = label("", 12, QFont.Weight.Normal, Staff.BONE)
         self.folders_row.setWordWrap(True)
         self.folders_row.hide()
@@ -947,11 +957,43 @@ class Window(QWidget):
                     return "bad", _why(text)
         return "unreadable", ""
 
+    def _identify_thread(self, dumps):
+        """Which of the found files are this game, then which of those is the build ReLink can use.
+
+        The title id comes from the .nup's own table of contents, so a file called anything at all is judged on what is
+        inside it. Files of other games are counted, not listed."""
+        for dump in dumps:
+            ids = finder.title_ids(dump["path"])
+            if ids is not None and OOT_TITLE not in ids:
+                self.check_q.put(("other", None, "", ""))
+                continue
+            self.check_q.put(("add", dump, "", ""))
+            state, why = self._check_one(dump["path"])
+            self.check_q.put(("state", dump["path"], state, why))
+        self.check_q.put(None)
+
     def _check_thread(self, paths):
         for path in paths:
             state, why = self._check_one(path)
-            self.check_q.put((path, state, why))
+            self.check_q.put(("state", path, state, why))
         self.check_q.put(None)
+
+    def finish_search(self):
+        """The list is complete: say what was found, and what was left out."""
+        if self.rows_by_path:
+            self.dumps_hint.hide()
+        elif self.others:
+            self.dumps_hint.setText("No copy of this game found: %d other .nup file%s here %s not it. Choose yours below."
+                                    % (self.others, "" if self.others == 1 else "s",
+                                       "is" if self.others == 1 else "are"))
+        else:
+            self.dumps_hint.setText("No .nup file found in Downloads, Desktop, Documents or the disks. "
+                                    "Choose yours below.")
+        if self.others and self.rows_by_path:
+            self.others_note.setText("%d other .nup file%s found %s not this game."
+                                     % (self.others, "" if self.others == 1 else "s",
+                                        "is" if self.others == 1 else "are"))
+            self.others_note.show()
 
     def add_dump(self, dump):
         row = FileRow(dump, self.select_row)
@@ -1176,23 +1218,26 @@ class Window(QWidget):
             while True:
                 dump = self.dump_q.get_nowait()
                 if dump is None:
-                    if not self.rows_by_path:
-                        self.dumps_hint.setText("No .nup file found in Downloads, Desktop, Documents or the disks. "
-                                                "Choose yours below.")
-                    else:
-                        self.dumps_hint.hide()
-                        threading.Thread(target=self._check_thread,
-                                         args=(list(self.rows_by_path),), daemon=True).start()
+                    self.dumps_hint.setText("Looking inside them…")
+                    threading.Thread(target=self._identify_thread, args=(self.pending,), daemon=True).start()
                     break
-                self.add_dump(dump)
+                self.pending.append(dump)
         except queue.Empty:
             pass
         try:
             while True:
                 item = self.check_q.get_nowait()
                 if item is None:
+                    self.finish_search()
                     break
-                path, state, why = item
+                kind, payload, state, why = item
+                if kind == "other":
+                    self.others += 1
+                    continue
+                if kind == "add":
+                    self.add_dump(payload)
+                    continue
+                path = payload
                 if path in self.rows_by_path:
                     self.rows_by_path[path].set_state(state, why)
                 # (the first copy that checks out is the one chosen, as the launcher does: the player can click another)
