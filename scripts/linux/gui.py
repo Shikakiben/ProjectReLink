@@ -5,6 +5,7 @@
 # The layout is the Windows launcher's: the sky of scene.py behind, the title on it, and an opaque panel carrying the
 # settings, so the window looks like a ReLink launcher at whatever hour the player starts it.
 import glob
+import json
 import math
 import os
 import re
@@ -51,6 +52,7 @@ import updates
 from theme import C, Button, Chip, Choice, PathEdit, css, font
 
 HERE = os.path.normpath(_appdir)
+CHOICES = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "relink", "install.json")
 PY = os.path.join(HERE, "usr", "python", "bin", "python3")
 MK = os.path.join(HERE, "usr", "share", "relink", "nx2", "make_game.py")
 
@@ -129,16 +131,26 @@ class Staff(QWidget):
     def __init__(self, items):
         super().__init__()
         self.items = list(items)      # [(id, label), ...]
+        self.subs = {}                # {id: the line under its label}
         self.value = 0.0
         self.stage = None             # the id of the step at work
         self.problem = False
         self.phase = 0.0
-        self.setFixedSize(self.WIDTH, self.TOP + 4 * self.GAP + 20 + 22)
+        self.setFixedSize(self.WIDTH, self.TOP + 4 * self.GAP + 20 + 40)
         self._timer = QTimer(self)
         self._timer.setInterval(30)
         self._timer.timeout.connect(self._breathe)
 
     # ---- what the window tells it ----
+    def set_items(self, items, subs=None):
+        """The notes change with the page: the build's four steps, or the home page's three."""
+        self.items = list(items)
+        self.subs = dict(subs or {})
+        self.stage = None
+        self.problem = False
+        self._timer.stop()
+        self.update()
+
     def set(self, v):
         self.value = max(0.0, min(1.0, v))
         if self.value >= 1.0:
@@ -216,6 +228,11 @@ class Staff(QWidget):
             state = self._state(ident)
             self._note(p, x, y, state)
             self._label(p, x, text_top, text_width, size, text, state)
+            if self.subs.get(ident):
+                p.setFont(font(12))
+                p.setPen(QColor(self.BONE_FAINT))
+                p.drawText(QRectF(x - text_width / 2, text_top + size + 6, text_width, 16),
+                           Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, self.subs[ident])
         p.end()
 
     def _note(self, p, x, y, state):
@@ -497,6 +514,7 @@ class Window(QWidget):
         # ================= the left column, on the sky =================
         col = QWidget()
         col.setFixedWidth(Staff.WIDTH)
+        col.setMaximumWidth(Staff.WIDTH)
         left = QVBoxLayout(col)
         left.setSpacing(0)
         left.setContentsMargins(0, 0, 0, 0)
@@ -559,6 +577,33 @@ class Window(QWidget):
         self.build_box.hide()
         left.addWidget(self.build_box)
 
+        # ---- once the game is built: the launcher's home, in the same column ----
+        self.home_box = QWidget()
+        home = QVBoxLayout(self.home_box)
+        home.setContentsMargins(0, 0, 0, 0)
+        home.setSpacing(0)
+        self.home_status = label("", 13, QFont.Weight.Normal, "InkSoft", wrap=True)
+        self.home_status.setFixedWidth(Staff.WIDTH)
+        home.addWidget(self.home_status)
+        home.addSpacing(14)
+        row = QHBoxLayout()
+        row.setSpacing(22)
+        self.play = Button("Play", "go")
+        self.play.setFixedWidth(300)
+        self.play.clicked.connect(self.play_game)
+        row.addWidget(self.play)
+        self.setup = Button("Set up the game", "link")
+        self.setup.clicked.connect(lambda: self.show_page(0))
+        row.addWidget(self.setup)
+        row.addStretch(1)
+        home.addLayout(row)
+        home.addSpacing(10)
+        self.home_note = label("", 12, QFont.Weight.Normal, Staff.BONE_FAINT, wrap=True)
+        self.home_note.setFixedWidth(Staff.WIDTH)
+        home.addWidget(self.home_note)
+        self.home_box.hide()
+        left.addWidget(self.home_box)
+
         left.addSpacing(12)
         foot = self.foot = QHBoxLayout()
         foot.setSpacing(8)
@@ -574,10 +619,10 @@ class Window(QWidget):
         self.folder.setEnabled(False)
         left.addWidget(self.folder, 0, Qt.AlignmentFlag.AlignLeft)
 
-        page.addWidget(col, 0)
+        page.addWidget(col, 1)
 
         # ================= the panel: the settings, then the build's own steps =================
-        panel = QFrame()
+        panel = self.panel = QFrame()
         panel.setObjectName("panel")
         panel.setMinimumWidth(419)   # (its own minimumSizeHint: below that its rows clip)
         panel.setStyleSheet("#panel { background: #142219; border: 1px solid #26382D; border-radius: 14px; }")
@@ -724,13 +769,20 @@ class Window(QWidget):
         self.details.hide()
         self.cancel_link.hide()
 
-        page.addWidget(panel, 1)
+        self.right = QStackedWidget()
+        self.right.addWidget(panel)
+        self.right.addWidget(QWidget())      # (the home page: nothing on the right, the sky shows)
+        page.addWidget(self.right, 1)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # (nothing is focused on open: no ring on a button nobody asked for)
         self.setFocus()
+        self.load_choices()
         self.show_page(0)   # (the setup page's own state: output closed, Cancel absent)
         self.refresh()
-        self.start_search()
+        if self.out and os.access(os.path.join(self.out, "relink"), os.X_OK):
+            self.show_home()          # (a game is already built: the launcher opens on its home page)
+        else:
+            self.start_search()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_tick)
         self.timer.start(100)
@@ -754,11 +806,31 @@ class Window(QWidget):
 
     # ---- the two pages ----
     def show_page(self, index):
+        """0: what to build from. 1: the build. 2: the game is built, play it."""
+        home = index == 2
+        self.right.setCurrentIndex(1 if home else 0)
+        self.home_box.setVisible(home)
+        if home:
+            # (the launcher's home: the notes are the game and the display, and the staff is theirs)
+            self.staff.set_items([("game", "Game"), ("pad", "Controller"), ("display", "Display")],
+                                 {"game": "Built", "pad": self.pad_note(), "display": self.display_note()})
+            self.staff.set(1.0)
+            self.rows_box.hide()
+            self.idle_box.hide()
+            self.build_box.hide()
+            self.version.hide()      # (the home page says the version itself, as the launcher does)
+            self.folder.show()
+            return
+        self.staff.set_items([("read", "Read"), ("lift", "Translate"), ("compile", "Compile"),
+                              ("finish", "Assemble")])
+        self.staff.set(0.0)
+        self.version.show()
         self.pages.setCurrentIndex(index)
         building = index == 1
         # (the three rows stay: they say what is being installed while it installs, as the launcher's build page does)
         self.idle_box.setVisible(not building)
         self.build_box.setVisible(building)
+        self.home_box.setVisible(False)
         self.details.setVisible(True)              # ("Show details" is offered on both pages)
         self.cancel_link.setVisible(building)      # (Cancel only means something while a build runs)
         self.log.setVisible(self.log_shown)        # (closed until asked for: it took the whole page)
@@ -798,6 +870,42 @@ class Window(QWidget):
             row.small_text("%d of %d files" % (self.files_compiled, self.files_changed))
         else:
             row.small_text("%d of %d changed files" % (self.files_compiled, self.files_changed))
+
+    # ---- what the player chose last time (launcher/Storage.cs) ----
+    def load_choices(self):
+        """The .nup, the folder and the language of the last run. A file that cannot be read is simply no memory."""
+        try:
+            with open(CHOICES, encoding="utf-8") as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(saved, dict):
+            return
+        self.nup = saved.get("nup") or ""
+        self.romfs = saved.get("romfs") or ""
+        self.exefs = saved.get("exefs") or ""
+        self.out = saved.get("out") or ""
+        self.src = "folders" if (self.romfs and self.exefs and not self.nup) else "nup"
+        code = saved.get("language") or ""
+        for i, (lang, _name) in enumerate(LANGUAGES):
+            if lang == code:
+                self.lang.setCurrentIndex(i)
+                break
+        if self.out:
+            self.edit_out.setText(self.out)
+            self.edit_out.setCursorPosition(0)
+        if self.romfs and self.exefs:
+            self.folders_row.setText("The romfs and exefs folders: %s   +   %s" % (self.romfs, self.exefs))
+            self.folders_row.show()
+
+    def save_choices(self):
+        try:
+            os.makedirs(os.path.dirname(CHOICES), exist_ok=True)
+            with open(CHOICES, "w", encoding="utf-8") as f:
+                json.dump({"nup": self.nup, "romfs": self.romfs, "exefs": self.exefs, "out": self.out,
+                           "language": self.lang.currentText().split(" ")[0]}, f)
+        except OSError:
+            pass
 
     # ---- the player's copy ----
     def start_search(self):
@@ -857,6 +965,7 @@ class Window(QWidget):
         self.folders_row.hide()
         self.src = "nup"
         self.mark_chosen()
+        self.save_choices()
         self.refresh()
 
     def mark_chosen(self):
@@ -882,6 +991,7 @@ class Window(QWidget):
             threading.Thread(target=self._check_thread, args=([p],), daemon=True).start()
             self.rows_by_path[p].set_chosen(True)
         self.folders_row.hide()
+        self.save_choices()
         self.refresh()
 
     def pick_dirs(self):
@@ -895,6 +1005,7 @@ class Window(QWidget):
         self.folders_row.setText("The romfs and exefs folders: %s   +   %s" % (self.romfs, self.exefs))
         self.folders_row.show()
         self.mark_chosen()
+        self.save_choices()
         self.refresh()
 
     def pick_out(self):
@@ -905,6 +1016,7 @@ class Window(QWidget):
             self.edit_out.setText(self.out)
             self.edit_out.setCursorPosition(0)
             threading.Thread(target=self._free_space, daemon=True).start()
+            self.save_choices()
             self.refresh()
 
     def _free_space(self):
@@ -915,6 +1027,47 @@ class Window(QWidget):
                              % (self.out, finder.size_text(free)))
         except OSError:
             self.space_q.put("")
+
+    def display_note(self):
+        """What the screen will do while the game runs, as the launcher's home says it."""
+        try:
+            screen = self.screen() or QApplication.primaryScreen()
+            geo = screen.geometry()
+            return "%dx%d, %d Hz" % (geo.width(), geo.height(), round(screen.refreshRate()))
+        except Exception:
+            return ""
+
+    def pad_note(self):
+        """What the launcher's home says about the controller: on Linux, whether one is plugged in."""
+        try:
+            return "Gamepad" if glob.glob("/dev/input/js*") else "Keyboard and mouse"
+        except Exception:
+            return "Keyboard and mouse"
+
+    def play_game(self):
+        game = os.path.join(self.out or "", "relink")
+        if not os.access(game, os.X_OK):
+            QMessageBox.information(self, "ReLink", "There is no game in %s yet." % (self.out or "that folder"))
+            return
+        # The builder's own variables are dropped: the built game loads relink_vk.so and libSDL2-2.0.so.0 from beside
+        # itself, and an LD_LIBRARY_PATH, APPDIR or PYTHON* left over from the AppImage can make it pick the image's
+        # copies instead. The same list the Longshot builder's longshot-launch drops.
+        env = {k: v for k, v in os.environ.items()
+               if not (k.startswith(("RELINK_", "PYTHON", "APPDIR", "APPIMAGE", "ARGV0", "OWD")) or k == "LD_LIBRARY_PATH")}
+        env["RELINK_NO_UPDATE_CHECK"] = "1"
+        try:
+            subprocess.Popen([game], cwd=self.out, env=env)
+            self.show_page(0)
+        except OSError as error:
+            QMessageBox.critical(self, "ReLink", "Cannot start the game:\n\n%s" % error)
+
+    def show_home(self):
+        """The game is built: the launcher's own home page, and Play."""
+        version = updates.version(HERE) or "dev"
+        self.home_status.setText("Version %s, up to date." % version)
+        self.home_note.setText("Full screen, 60 frames a second: F11 and the game's own F1 menu change these while "
+                              "you play.")
+        self.show_page(2)
 
     def open_folder(self):
         if self.out and os.path.isdir(self.out):
@@ -1122,21 +1275,11 @@ class Window(QWidget):
         game = os.path.join(self.out, "relink")
         if code == 0 and os.access(game, os.X_OK):
             self.write("\n== done: %s ==\n" % game, "Go")
-            # (the closing page: the log shown, the way the launcher finishes an install)
-            self.log_shown = True
-            self.details.setText("Hide details")
-            self.show_page(0)
+            self.log_shown = False
+            self.details.setText("Show details")
+            # (the launcher ends an install on its home page, with Play under the game that was just built)
+            self.show_home()
             self.state.setText("Built.")
-            if QMessageBox.question(self, "ReLink", "The game is built in\n%s\n\nPlay it now?" % self.out) == QMessageBox.StandardButton.Yes:
-                # The builder's own variables are dropped: the built game loads relink_vk.so and libSDL2-2.0.so.0 from
-                # beside itself, and an LD_LIBRARY_PATH, APPDIR or PYTHON* left over from the AppImage can make it pick
-                # the image's copies instead. The same list the Longshot builder's longshot-launch drops.
-                env = {k: v for k, v in os.environ.items()
-                       if not (k.startswith(("RELINK_", "PYTHON", "APPDIR", "APPIMAGE", "ARGV0", "OWD"))
-                               or k == "LD_LIBRARY_PATH")}
-                env["RELINK_NO_UPDATE_CHECK"] = "1"
-                subprocess.Popen([game], cwd=self.out, env=env)
-                self.close()
         else:
             if self.stage_id in self.step_rows:
                 self.step_rows[self.stage_id].stopped()
