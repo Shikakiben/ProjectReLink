@@ -37,6 +37,10 @@ from PySide6.QtGui import (QColor, QFont, QFontMetrics, QLinearGradient, QPainte
 from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
                                QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
+# (-I, which AppRun passes, is isolated mode: it keeps the script's own directory out of sys.path, so the three modules
+#  beside this file have to be put there. Without this the AppImage dies on "No module named 'scene'".)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import scene
 import theme as T
 import updates

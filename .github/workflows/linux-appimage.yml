@@ -94,6 +94,26 @@ jobs:
           RELINK_VERSION: ${{ steps.version.outputs.tag }}
         run: scripts/linux/appimage.sh
 
+      # The window and make_game.py are a package of scripts, not one file: AppRun starts gui.py with "python3 -I", and
+      # isolated mode keeps the script's own directory out of sys.path. A missing side module (scene.py, theme.py,
+      # updates.py) is then invisible to every check that does not run it the way AppRun does — v0.7.6 shipped with
+      # "No module named 'scene'". This starts the window from the assembled AppDir, exactly as AppRun does, and fails
+      # the build if it cannot come up.
+      - name: The window starts
+        run: |
+          export QT_QPA_PLATFORM=offscreen
+          python=$(ls -d build-linux/AppDir/usr/python/bin/python3)
+          "$python" -I build-linux/AppDir/usr/share/relink/scripts/linux/gui.py &
+          pid=$!
+          sleep 12
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "::error::the window did not stay up: see the log above"
+            wait "$pid" || true
+            exit 1
+          fi
+          kill "$pid" 2>/dev/null || true
+          echo "the window came up and stayed up"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ReLink-linux-x86_64
