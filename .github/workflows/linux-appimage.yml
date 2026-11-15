@@ -107,6 +107,12 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ReLink ${{ steps.version.outputs.tag }} — Linux AppImage
           body: |
+            > [!WARNING]
+            > **This build is automatic and untested.** The AppImage is made unattended when upstream publishes a
+            > release, and nothing here plays the game: a build can be broken, or build a game that will not start.
+            > If it does, please **open an issue** on this repository saying which version this is
+            > (`${{ steps.version.outputs.tag }}`).
+
             The Linux AppImage of ProjectReLink ${{ steps.version.outputs.tag }} (x86_64, glibc 2.35 and newer).
 
             It carries the builder, its compiler, Python, FFmpeg, SDL2 and the Vulkan back end: the game is built on
