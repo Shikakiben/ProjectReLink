@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 # ReLink's window: what to build from, where, the language, then the build with its own output shown as it goes.
 # Called by AppRun when it is given no argument; any argument goes to make_game.py as it is (the command line).
-# tkinter only: the AppImage's Python carries it, and nothing else has to be installed or built.
+# customtkinter over the AppImage's own tkinter: rounded widgets and a real dark theme, 1.7 MB, nothing to build.
 import os
 import queue
 import subprocess
-import sys
 import threading
 import tkinter as tk
-import tkinter.font as tkfont
-from tkinter import ttk, filedialog, messagebox
+from tkinter import filedialog, messagebox
+
+try:
+    import customtkinter as ctk
+except ImportError:   # (an AppImage built before customtkinter was added to deps.sh: say so, do not vanish)
+    import tkinter as _tk
+    import tkinter.messagebox as _mb
+    _r = _tk.Tk()
+    _r.withdraw()
+    _mb.showerror("ReLink", "This AppImage has no customtkinter, so it cannot draw its window.\n"
+                            "Run it with --help for the command line.")
+    raise SystemExit(1)
 
 HERE = os.environ.get("RELINK_APPDIR") or os.path.dirname(os.path.abspath(__file__)) + "/../../../../.."
 PY = os.path.join(HERE, "usr", "python", "bin", "python3")
@@ -24,23 +33,18 @@ LANGUAGES = [
     ("ja", "日本語"), ("ko", "한국어"), ("zh-Hans", "简体中文"), ("zh-Hant", "繁體中文"),
 ]
 
-BG      = "#151a21"   # the window
-CARD    = "#1c232c"   # the panels
-LINE    = "#2b3542"   # their edges
-FG      = "#e6edf3"   # text
-DIM     = "#8b98a5"   # the notes under a row
-ACCENT  = "#5bb8a6"   # what to press, and what the build says
-ACCENT2 = "#3f8f81"   # its shade when the mouse is on it
-LOG_BG  = "#0e1318"
-ERR     = "#e0755f"
+BG     = "#12161c"
+CARD   = "#1b222b"
+CARD2  = "#232c37"
+LINE   = "#2d3845"
+FG     = "#e8eef5"
+DIM    = "#8794a3"
+ACCENT = "#57b9a5"
+ACCENT_HOVER = "#48a491"
+LOG_BG = "#0c1015"
 
-
-def pick_font(root, wanted, fallback):
-    have = {f.lower() for f in tkfont.families(root)}
-    for name in wanted:
-        if name.lower() in have:
-            return name
-    return fallback
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("green")
 
 
 class Window:
@@ -53,142 +57,122 @@ class Window:
         self.romfs = tk.StringVar()
         self.exefs = tk.StringVar()
         self.out = tk.StringVar()
-        self.lang = tk.StringVar(value="fr")
+        self.lang = ctk.StringVar(value="fr — Français")
 
-        ui = pick_font(root, ["Inter", "Cantarell", "Noto Sans", "Liberation Sans", "DejaVu Sans"], "TkDefaultFont")
-        mono = pick_font(root, ["JetBrains Mono", "Cascadia Mono", "Liberation Mono", "DejaVu Sans Mono"], "TkFixedFont")
-        self.f_body = (ui, 10)
-        self.f_small = (ui, 9)
-        self.f_head = (ui, 17, "bold")
-        self.f_sec = (ui, 9, "bold")
-        self.f_mono = (mono, 9)
+        self.f_head = ctk.CTkFont(size=24, weight="bold")
+        self.f_sub = ctk.CTkFont(size=12)
+        self.f_body = ctk.CTkFont(size=13)
+        self.f_sec = ctk.CTkFont(size=11, weight="bold")
+        self.f_small = ctk.CTkFont(size=11)
+        self.f_btn = ctk.CTkFont(size=13, weight="bold")
+        self.f_mono = ctk.CTkFont(family="Liberation Mono", size=11)
 
         root.title("ReLink — Ocarina of Time (Switch 2)")
-        root.minsize(860, 700)
-        root.configure(background=BG)
-        self.centre(920, 740)
+        root.minsize(880, 720)
+        root.configure(fg_color=BG)
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.geometry("940x780+%d+%d" % (max(0, (sw - 940) // 2), max(0, (sh - 780) // 3)))
 
-        st = ttk.Style(root)
-        st.theme_use("clam")
-        st.configure(".", background=BG, foreground=FG, font=self.f_body)
-        st.configure("TFrame", background=BG)
-        st.configure("Card.TFrame", background=CARD)
-        st.configure("TLabel", background=BG, foreground=FG, font=self.f_body)
-        st.configure("Card.TLabel", background=CARD, foreground=FG, font=self.f_body)
-        st.configure("Dim.TLabel", background=CARD, foreground=DIM, font=self.f_small)
-        st.configure("Sec.TLabel", background=CARD, foreground=ACCENT, font=self.f_sec)
-        st.configure("Head.TLabel", background=BG, foreground=FG, font=self.f_head)
-        st.configure("Status.TLabel", background=BG, foreground=DIM, font=self.f_small)
-        st.configure("TRadiobutton", background=CARD, foreground=FG, font=self.f_body,
-                     indicatorcolor=CARD, focuscolor=CARD)
-        st.map("TRadiobutton", background=[("active", CARD)], foreground=[("disabled", DIM)])
-        st.configure("TButton", background="#232d38", foreground=FG, font=self.f_body,
-                     borderwidth=0, focusthickness=0, padding=(14, 7))
-        st.map("TButton", background=[("active", "#2c3846"), ("disabled", "#1a212a")],
-               foreground=[("disabled", "#5d6b7a")])
-        st.configure("Accent.TButton", background=ACCENT, foreground="#0b1116",
-                     font=(ui, 10, "bold"), borderwidth=0, padding=(20, 9))
-        st.map("Accent.TButton", background=[("active", ACCENT2), ("disabled", "#2a3d3a")],
-               foreground=[("disabled", "#6b807c")])
-        st.configure("TCombobox", fieldbackground="#232d38", background="#232d38",
-                     foreground=FG, arrowcolor=FG, bordercolor=LINE, lightcolor=LINE, darkcolor=LINE,
-                     selectbackground="#232d38", selectforeground=FG, padding=(8, 6))
-        st.map("TCombobox", fieldbackground=[("readonly", "#232d38")], foreground=[("readonly", FG)])
-        st.configure("Bar.Horizontal.TProgressbar", background=ACCENT, troughcolor="#0d1218",
-                     bordercolor="#0d1218", lightcolor=ACCENT, darkcolor=ACCENT, thickness=8)
+        page = ctk.CTkFrame(root, fg_color=BG, corner_radius=0)
+        page.pack(fill="both", expand=True, padx=26, pady=22)
 
         # ---- header ----
-        head = ttk.Frame(root)
-        head.pack(fill="x", padx=26, pady=(22, 4))
-        ttk.Label(head, text="ReLink", style="Head.TLabel").pack(side="left")
-        ttk.Label(head, text="Ocarina of Time · Switch 2 · built from your own copy",
-                  style="Status.TLabel").pack(side="left", padx=(12, 0), pady=(6, 0))
-        tk.Frame(root, background=ACCENT, height=2).pack(fill="x", padx=26, pady=(10, 0))
-
-        body = ttk.Frame(root)
-        body.pack(fill="both", expand=True, padx=26, pady=18)
+        head = ctk.CTkFrame(page, fg_color=BG)
+        head.pack(fill="x")
+        ctk.CTkLabel(head, text="ReLink", font=self.f_head, text_color=FG).pack(side="left")
+        ctk.CTkLabel(head, text="Ocarina of Time · Switch 2 · built from your own copy",
+                     font=self.f_sub, text_color=DIM).pack(side="left", padx=(14, 0), pady=(8, 0))
+        ctk.CTkFrame(page, fg_color=ACCENT, height=2, corner_radius=1).pack(fill="x", pady=(14, 18))
 
         # ---- 1. the game ----
-        c1 = self.card(body, "1", "Your copy of the game")
-        ttk.Radiobutton(c1, text="A .nup file", value="nup", variable=self.src,
-                        command=self.refresh).grid(row=1, column=0, sticky="w", pady=2)
-        ttk.Radiobutton(c1, text="The romfs and exefs folders", value="folders", variable=self.src,
-                        command=self.refresh).grid(row=2, column=0, sticky="w", pady=2)
-        self.nup_label = ttk.Label(c1, style="Dim.TLabel")
-        self.nup_label.grid(row=1, column=1, sticky="w", padx=12)
-        ttk.Button(c1, text="Choose…", command=self.choose_nup).grid(row=1, column=2, sticky="e")
-        self.folders_label = ttk.Label(c1, style="Dim.TLabel")
-        self.folders_label.grid(row=2, column=1, sticky="w", padx=12)
-        ttk.Button(c1, text="Choose…", command=self.choose_folders).grid(row=2, column=2, sticky="e")
-        c1.columnconfigure(1, weight=1)
+        c1 = self.card(page, "1", "YOUR COPY OF THE GAME")
+        self.rb_nup = ctk.CTkRadioButton(c1, text="A .nup file", variable=self.src, value="nup",
+                                         command=self.refresh, font=self.f_body, text_color=FG,
+                                         fg_color=ACCENT, hover_color=ACCENT_HOVER, border_color=LINE)
+        self.rb_nup.pack(anchor="w", pady=(2, 6))
+        self.nup_label = ctk.CTkLabel(c1, text="none chosen", font=self.f_small, text_color=DIM,
+                                      anchor="w")
+        self.nup_label.pack(fill="x", padx=(28, 0))
+        self.bt_nup = ctk.CTkButton(c1, text="Choose the .nup…", width=170, command=self.choose_nup,
+                                    fg_color=CARD2, hover_color=LINE, text_color=FG, font=self.f_small,
+                                    corner_radius=8)
+        self.bt_nup.pack(anchor="w", padx=(28, 0), pady=(0, 10))
+
+        ctk.CTkRadioButton(c1, text="The romfs and exefs folders", variable=self.src, value="folders",
+                           command=self.refresh, font=self.f_body, text_color=FG,
+                           fg_color=ACCENT, hover_color=ACCENT_HOVER, border_color=LINE).pack(anchor="w", pady=(2, 6))
+        self.folders_label = ctk.CTkLabel(c1, text="none chosen", font=self.f_small, text_color=DIM, anchor="w")
+        self.folders_label.pack(fill="x", padx=(28, 0))
+        ctk.CTkButton(c1, text="Choose the folders…", width=170, command=self.choose_folders,
+                      fg_color=CARD2, hover_color=LINE, text_color=FG, font=self.f_small,
+                      corner_radius=8).pack(anchor="w", padx=(28, 0))
 
         # ---- 2. where ----
-        c2 = self.card(body, "2", "Where the game is built")
-        self.out_label = ttk.Label(c2, style="Dim.TLabel")
-        self.out_label.grid(row=1, column=0, sticky="w", columnspan=2)
-        ttk.Button(c2, text="Choose…", command=self.choose_out).grid(row=1, column=2, sticky="e")
-        c2.columnconfigure(0, weight=1)
+        c2 = self.card(page, "2", "WHERE THE GAME IS BUILT")
+        self.out_label = ctk.CTkLabel(c2, text="none chosen", font=self.f_small, text_color=DIM, anchor="w")
+        self.out_label.pack(fill="x")
+        ctk.CTkButton(c2, text="Choose the folder…", width=170, command=self.choose_out,
+                      fg_color=CARD2, hover_color=LINE, text_color=FG, font=self.f_small,
+                      corner_radius=8).pack(anchor="w", pady=(6, 0))
 
         # ---- 3. language ----
-        c3 = self.card(body, "3", "The game's language")
-        ttk.Combobox(c3, textvariable=self.lang, state="readonly", width=34, font=self.f_body,
-                     values=["%s — %s" % (c, n) for c, n in LANGUAGES]).grid(row=1, column=0, sticky="w")
+        c3 = self.card(page, "3", "THE GAME'S LANGUAGE")
+        ctk.CTkOptionMenu(c3, variable=self.lang, values=["%s — %s" % (c, n) for c, n in LANGUAGES],
+                          width=280, font=self.f_body, dropdown_font=self.f_body,
+                          fg_color=CARD2, button_color=LINE, button_hover_color=ACCENT_HOVER,
+                          text_color=FG, dropdown_fg_color=CARD, dropdown_hover_color=LINE,
+                          dropdown_text_color=FG, corner_radius=8).pack(anchor="w")
 
         # ---- the build ----
-        bar = ttk.Frame(body)
-        bar.pack(fill="x", pady=(16, 0))
-        self.go = ttk.Button(bar, text="Build the game", style="Accent.TButton",
-                             command=self.start, state="disabled")
+        bar = ctk.CTkFrame(page, fg_color=BG)
+        bar.pack(fill="x", pady=(6, 0))
+        self.go = ctk.CTkButton(bar, text="Build the game", width=190, height=42, command=self.start,
+                                state="disabled", font=self.f_btn, corner_radius=10,
+                                fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#08120f")
         self.go.pack(side="left")
-        self.stop = ttk.Button(bar, text="Stop", command=self.cancel, state="disabled")
-        self.stop.pack(side="left", padx=8)
-        self.state = ttk.Label(bar, text="", style="Status.TLabel")
+        self.stop = ctk.CTkButton(bar, text="Stop", width=90, height=42, command=self.cancel,
+                                  state="disabled", font=self.f_body, corner_radius=10,
+                                  fg_color=CARD2, hover_color=LINE, text_color=FG)
+        self.stop.pack(side="left", padx=10)
+        self.state = ctk.CTkLabel(bar, text="", font=self.f_small, text_color=DIM, anchor="w")
         self.state.pack(side="left", padx=12)
 
-        self.bar = ttk.Progressbar(body, style="Bar.Horizontal.TProgressbar", maximum=100)
-        self.bar.pack(fill="x", pady=(12, 0))
+        self.bar = ctk.CTkProgressBar(page, height=6, corner_radius=3, progress_color=ACCENT,
+                                      fg_color="#0a0e12")
+        self.bar.set(0)
+        self.bar.pack(fill="x", pady=(14, 0))
 
         # ---- the builder's own output ----
-        wrap = tk.Frame(body, background=LINE, padx=1, pady=1)
-        wrap.pack(fill="both", expand=True, pady=(14, 0))
-        self.log = tk.Text(wrap, wrap="none", height=16, background=LOG_BG, foreground="#c9d4df",
-                           insertbackground=FG, font=self.f_mono, borderwidth=0, padx=12, pady=10,
-                           selectbackground="#2b3542", selectforeground=FG)
-        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.log.yview)
-        self.log.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.log.pack(fill="both", expand=True)
-        self.log.tag_configure("stage", foreground=ACCENT, font=(mono, 9, "bold"), spacing1=6, spacing3=2)
-        self.log.tag_configure("err", foreground=ERR, font=(mono, 9, "bold"))
-        self.log.tag_configure("cmd", foreground="#6f8296")
+        self.log = ctk.CTkTextbox(page, fg_color=LOG_BG, border_color=LINE, border_width=1,
+                                  corner_radius=10, font=self.f_mono, text_color="#c6d2df",
+                                  wrap="none", activate_scrollbars=True)
+        self.log.pack(fill="both", expand=True, pady=(14, 0))
+        self.log.tag_config("stage", foreground=ACCENT)
+        self.log.tag_config("err", foreground="#e0755f")
+        self.log.tag_config("cmd", foreground="#64758a")
         self.log.configure(state="disabled")
 
         self.refresh()
         root.after(100, self.drain)
 
-    # ---- drawing ----
-    def centre(self, w, h):
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 3)))
-
     def card(self, parent, number, title):
-        wrap = tk.Frame(parent, background=LINE, padx=1, pady=1)
-        wrap.pack(fill="x", pady=(0, 12))
-        inner = ttk.Frame(wrap, style="Card.TFrame", padding=(16, 12))
-        inner.pack(fill="x")
-        head = ttk.Frame(inner, style="Card.TFrame")
-        head.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
-        ttk.Label(head, text=number, style="Sec.TLabel").pack(side="left")
-        ttk.Label(head, text=title, style="Card.TLabel").pack(side="left", padx=(8, 0))
-        return inner
+        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12, border_width=1, border_color=LINE)
+        card.pack(fill="x", pady=(0, 12))
+        head = ctk.CTkFrame(card, fg_color=CARD)
+        head.pack(fill="x", padx=18, pady=(14, 8))
+        ctk.CTkLabel(head, text=number, font=self.f_sec, text_color=ACCENT).pack(side="left")
+        ctk.CTkLabel(head, text=title, font=self.f_sec, text_color=DIM).pack(side="left", padx=(8, 0))
+        body = ctk.CTkFrame(card, fg_color=CARD)
+        body.pack(fill="x", padx=18, pady=(0, 16))
+        return body
 
     # ---- the fields ----
     def refresh(self):
         is_nup = self.src.get() == "nup"
         self.nup_label.configure(text=self.nup.get() or "none chosen",
-                                 foreground=FG if self.nup.get() else DIM)
+                                 text_color=FG if self.nup.get() else DIM)
         text = self.romfs.get() + "  +  " + self.exefs.get() if (self.romfs.get() and self.exefs.get()) else ""
-        self.folders_label.configure(text=text or "none chosen", foreground=FG if text else DIM)
+        self.folders_label.configure(text=text or "none chosen", text_color=FG if text else DIM)
         ready = (bool(self.nup.get()) if is_nup else bool(self.romfs.get() and self.exefs.get())) and bool(self.out.get())
         self.go.configure(state="normal" if ready and not self.proc else "disabled")
         if not self.proc:
@@ -226,7 +210,7 @@ class Window:
                                     initialdir=os.path.expanduser("~"))
         if p:
             self.out.set(os.path.join(p, "ReLink"))
-            self.out_label.configure(text=self.out.get(), foreground=FG)
+            self.out_label.configure(text=self.out.get(), text_color=FG)
             self.refresh()
 
     # ---- the build ----
@@ -240,7 +224,7 @@ class Window:
         os.makedirs(self.out.get(), exist_ok=True)
         args += ["--log", self.log_path]
         self.written("$ " + " ".join(args) + "\n\n", "cmd")
-        self.bar.configure(value=0)
+        self.bar.set(0)
         self.go.configure(state="disabled")
         self.stop.configure(state="normal")
         self.state.configure(text="Building…")
@@ -273,7 +257,7 @@ class Window:
                     kind, _, rest = line[2:].partition(" ")
                     if kind == "progress":
                         try:
-                            self.bar.configure(value=float(rest) * 100)
+                            self.bar.set(max(0.0, min(1.0, float(rest))))
                         except ValueError:
                             pass
                     elif kind == "stage":
@@ -309,7 +293,7 @@ class Window:
         game = os.path.join(self.out.get(), "relink")
         if code == 0 and os.access(game, os.X_OK):
             self.state.configure(text="Built.")
-            self.bar.configure(value=100)
+            self.bar.set(1)
             self.written("\n== done: %s ==\n" % game, "stage")
             if messagebox.askyesno("ReLink", "The game is built in\n%s\n\nPlay it now?" % self.out.get()):
                 # The builder's own variables are dropped: the built game loads relink_vk.so and libSDL2-2.0.so.0 from
@@ -326,11 +310,7 @@ class Window:
             messagebox.showerror("ReLink", "The build did not finish. Its log is in\n%s/build.log" % self.out.get())
 
 
-def main():
-    root = tk.Tk()
+if __name__ == "__main__":
+    root = ctk.CTk()
     Window(root)
     root.mainloop()
-
-
-if __name__ == "__main__":
-    main()
