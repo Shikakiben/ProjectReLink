@@ -53,7 +53,18 @@ def module_of(img, pc):
     return "?"
 
 
-def coverage(L, img, out_dir):
+# (the lift's own phases, weighted by what each takes on this game: 3 s for the image, 34 s for the discovery, 14 s for
+#  the coverage, 38 s for writing the C. These are the lift's 0..1; make_game.py maps that into the lift stage's share
+#  of the whole build, so the window's percentage moves through the translation instead of sitting still at 10 %)
+PHASE = {"image": 0.03, "discover": 0.41, "coverage": 0.57, "write": 1.0}
+
+
+def progress(f):
+    """The lift's own progress, 0 to 1, as "@@lift <f>". make_game.py reads it and says it as the build's progress."""
+    print("@@lift %.3f" % max(0.0, min(1.0, f)), flush=True)
+
+
+def coverage(L, img, out_dir, progress=None):
     """Per-module: functions, instructions, untranslated words; and the share of functions that translate fully."""
     keys = {}
     for body, _ in L.funcs.values():
@@ -74,7 +85,10 @@ def coverage(L, img, out_dir):
     bad -= undefined
     per = collections.defaultdict(collections.Counter)
     sites = collections.Counter()
-    for e, (body, _) in L.funcs.items():
+    step = max(1, len(L.funcs) // 100)
+    for i, (e, (body, _)) in enumerate(L.funcs.items()):
+        if progress and i % step == 0:
+            progress(i / max(1, len(L.funcs)))
         m = module_of(img, e)
         n_bad = 0
         for pc, (k, w) in body.items():
@@ -149,6 +163,7 @@ def main():
     out_dir = os.path.join(a.work, "sa") if a.standalone else a.work
     img_dir = os.path.join(out_dir, "image")
     meta = img.write(img_dir)
+    progress(PHASE["image"])
     print("image: %s; %d entries, %d trampolines (%d unresolved non-weak imports) (%.0fs)" % (
         ", ".join("%s@%#x+%#x" % (m["name"], m["base"], m["size"]) for m in meta["modules"]),
         len(img.entries), len(img.tramp), len(img.unresolved), time.time() - t0))
@@ -175,9 +190,28 @@ def main():
             oot_jitter.install(L, img)
         import oot_occlusion   # (no occlusion queries when RELINK_OCCLUSION_OFF=1: Fritchii's Occlusion Off)
         oot_occlusion.install(L, img)
-    L.discover(max_insns=a.max_func)
+    # (the discovery walks every entry: counting the walks reports it without editing the vendored kit, which this
+    #  project wraps rather than patches — see third_party/a64-kit/PROVENANCE.md)
+    entries = max(1, len(img.entries))
+    walked = [0]
+    walk = L.walk
+
+    def walk_counted(e):
+        walked[0] += 1
+        if walked[0] % max(1, entries // 100) == 0:
+            progress(PHASE["image"] + (PHASE["discover"] - PHASE["image"]) * min(1.0, walked[0] / entries))
+        return walk(e)
+
+    L.walk = walk_counted
+    try:
+        L.discover(max_insns=a.max_func)
+    finally:
+        L.walk = walk
+    progress(PHASE["discover"])
     print("discovered %d functions (%.0fs)" % (len(L.funcs), time.time() - t0))
-    total = coverage(L, img, img_dir)
+    total = coverage(L, img, img_dir,
+                     progress=lambda f: progress(PHASE["discover"] + (PHASE["coverage"] - PHASE["discover"]) * f))
+    progress(PHASE["coverage"])
     jt = L.stats
     print("jump tables %d (bounded %d, bounded by function %d, ADR table %d), BR without a table %d, PLT stubs %d" % (
         len(L.jt), jt["jt_bounded"], jt["jt_unbounded"], jt["jt_adr_table"], len(L.jt_missing), len(L.plt)))
@@ -192,7 +226,8 @@ def main():
             poll.install()
         gen = os.path.join(out_dir, "gen")
         files = chunks.write(L, gen, os.path.join(a.work, "image"), a.rechunk and not a.standalone,
-                             counters=[] if a.no_polls else [poll.stats])
+                             counters=[] if a.no_polls else [poll.stats],
+                             progress=lambda f: progress(PHASE["coverage"] + (PHASE["write"] - PHASE["coverage"]) * f))
         import oot_patches
         main_build = next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), "")
         edit_c(gen, L.stats, a.standalone and main_build == oot_patches.LIFE_BUILD_ID, whole=not a.max_func)
@@ -207,6 +242,7 @@ def main():
         L.report()
         print("interrupt polls: %d loop headers in %d functions" % (poll.stats["polls"], poll.stats["functions"]))
         print("wrote %d code files to %s (%.0fs)" % (len(files), gen, time.time() - t0))
+    progress(1.0)
     print("done (%.0fs)" % (time.time() - t0))
 
 

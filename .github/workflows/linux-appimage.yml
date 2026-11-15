@@ -50,20 +50,36 @@ jobs:
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # The window (scripts/linux/gui.py) is not self-contained: it reads make_game.py's lines and passes its options,
+      # and that file belongs to upstream, which edits it often. A rename there (say @@eta becoming @@time) would build
+      # and publish an AppImage whose time estimate and progress bar silently stop working: the window still opens, so
+      # nothing looks broken. These are the words the two share; if one goes, the build stops before the release.
+      - name: The window and make_game.py still speak the same language
+        run: |
+          missing=0
+          for word in '@@stage' '@@progress' '@@eta' '@@plan' '@@file' '@@error' \
+                      '--nup' '--romfs' '--exefs' '--out' '--language' '--log'; do
+            if ! grep -q -- "$word" nx2/make_game.py; then
+              echo "::error::make_game.py no longer has $word, which scripts/linux/gui.py uses"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] && echo "all 12 words the window and the builder share are there"
+
       - name: Version
         id: version
         run: |
           # The release this fork is on: the newest upstream tag that is a plain vX.Y.Z. git describe cannot say it
           # here: this workflow's own releases are tags too, and describe would pick the newest of those, so each
-          # release would be named after the one before. The commits on top of it (our Linux work) are counted and
-          # become the suffix, so v0.6.5-linux.12 says 12 commits past upstream's v0.6.5.
+          # release would be named after the one before.
+          #
+          # The AppImage takes that version AS IT IS. It used to add "-linux.<commits since the tag>", which made a
+          # new number for every commit; but a rebuilt AppImage of the same upstream release is a replacement, not a
+          # new release, so a bad build is replaced in place instead of piling up versions.
           base=$(git tag --merged HEAD --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-          base=${base:-v0}
-          count=$(git rev-list --count "$base"..HEAD 2>/dev/null || echo 0)
-          tag="$base"
-          [ "$count" != "0" ] && tag="$base-linux.$count"
+          tag=${base:-v0}
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "the AppImage is $tag ($count commits past $base)"
+          echo "the AppImage is $tag"
 
       - uses: actions/cache@v4
         with:

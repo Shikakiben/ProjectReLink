@@ -246,7 +246,8 @@ def run(cmd, env=None, on_line=None, check=True, output=None):
     lines = []
     for line in p.stdout:
         line = line.rstrip()
-        print(line, file=output, flush=True)
+        if not line.startswith("@@lift "):   # (the lift's own progress: on_line turns it into @@progress)
+            print(line, file=output, flush=True)
         lines.append(line)
         if on_line:
             on_line(line)
@@ -1142,7 +1143,10 @@ def main(a=None):
                     except OSError as e:
                         fail("Could not remove earlier translated file %s: %s. The new translation has not started." %
                              (os.path.join(gen_dir, f), e))
-        run(PY + ["nx2/lift.py", "--standalone", "--write", "--exefs", exefs, "--work", work], env)
+        # (the lift says its own progress as "@@lift <0..1>"; say() maps it into the lift stage's share of the build,
+        #  so the window's percentage moves through the translation instead of sitting still at 10 %)
+        run(PY + ["nx2/lift.py", "--standalone", "--write", "--exefs", exefs, "--work", work], env,
+            on_line=lambda line: say("progress", line[7:]) if line.startswith("@@lift ") else None)
         if os.path.isfile(os.path.join(work, "sa", "gen", "code_hot.c")):
             run(PY + ["nx2/split_hot.py", os.path.join(work, "sa", "gen")], env)   # (eight files side by side: ~6 minutes, not 79)
         write_lift_key(work, key)

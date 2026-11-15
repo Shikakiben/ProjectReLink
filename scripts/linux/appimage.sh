@@ -46,6 +46,9 @@ rm -f "$T/third_party/a64-kit/tools/lld-link.exe"
 
 # ---- what it builds with ----
 cp -a "$DEPS/python" "$APPDIR/usr/python"
+# (PySide6 ships 245 MB; the window uses QtCore, QtGui, QtWidgets and the xcb/wayland plugins, 111 MB. trim_pyside.py
+# follows ldd from those and keeps nothing else)
+"$PY" -I "$ROOT/scripts/linux/trim_pyside.py" "$APPDIR/usr/python/lib/python3.12/site-packages/PySide6"
 mkdir -p "$L/emsdk"
 cp -a "$DEPS/emsdk/upstream" "$L/emsdk/"
 cp -a "$DEPS/ffmpeg" "$L/ffmpeg"

@@ -167,9 +167,10 @@ def parallel_emit(emit, order, texts, counters, jobs, run=2000):
             yield (e,) + tuple(emit(e, texts))
 
 
-def write(L, gen_dir, img_dir, rechunk=False, counters=(), jobs=None):
+def write(L, gen_dir, img_dir, rechunk=False, counters=(), jobs=None, progress=None):
     """L.write(gen_dir) with stable boundaries; returns its files. counters: dicts the emit adds to besides the
-    lifter's own (poll.stats); jobs: emit processes (emit_jobs())"""
+    lifter's own (poll.stats); jobs: emit processes (emit_jobs()); progress: called with 0..1 as the functions are
+    emitted, about a hundred times over the whole write"""
     starts = [] if rechunk else load(img_dir)
     if not starts and not rechunk:
         starts = seed_from_gen(gen_dir)
@@ -177,6 +178,9 @@ def write(L, gen_dir, img_dir, rechunk=False, counters=(), jobs=None):
     base_emit = L.emit_function
     jobs = emit_jobs() if jobs is None else jobs
     made = None
+    total = max(1, len(L.funcs))
+    step = max(1, total // 100)
+    done = [0]
 
     def emit_function(e, texts):
         nonlocal made
@@ -187,6 +191,9 @@ def write(L, gen_dir, img_dir, rechunk=False, counters=(), jobs=None):
         got = next(made, None)
         if got is None or got[0] != e:
             raise SystemExit("chunks: write() asked for f_%08x, the emit made %s" % (e, "f_%08x" % got[0] if got else "nothing"))
+        done[0] += 1
+        if progress and done[0] % step == 0:
+            progress(done[0] / total)
         return got[1], got[2]
     L.emit_function = emit_function
     try:

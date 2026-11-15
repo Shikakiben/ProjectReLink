@@ -1,0 +1,65 @@
+# Follow upstream, hourly: when pixl27/ProjectReLink publishes a new release tag, merge it into this fork's main.
+#
+# The Linux AppImage is built by linux-appimage.yml on every push to main, so the merge IS what starts the build: a
+# quiet hour runs this job alone (about twenty seconds) and nothing else. A merge that conflicts stops here, so no
+# AppImage is ever produced from a half-merged upstream.
+name: Follow upstream
+on:
+  schedule:
+    - cron: "17 * * * *"   # every hour at :17 (GitHub delays scheduled runs when its runners are busy)
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: follow-upstream
+  cancel-in-progress: false
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Is there a newer upstream release?
+        id: check
+        run: |
+          set -e
+          git remote add upstream https://github.com/pixl27/ProjectReLink.git
+          git fetch --quiet --tags upstream
+          # (only plain vX.Y.Z: the fork's older "-linux.N" tags are not versions, and neither is any other suffix)
+          upstream_tag=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          ours=$(git tag --merged HEAD --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          echo "upstream=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "ours=$ours" >> "$GITHUB_OUTPUT"
+          if [ "$upstream_tag" = "$ours" ]; then
+            echo "new=no" >> "$GITHUB_OUTPUT"
+            echo "this fork is on $ours, upstream's newest release: nothing to do"
+          else
+            echo "new=$upstream_tag" >> "$GITHUB_OUTPUT"
+            echo "upstream released $upstream_tag, this fork is on $ours: merging"
+          fi
+
+      - name: Merge it into main
+        if: steps.check.outputs.new != 'no'
+        run: |
+          set -e
+          git config user.name "ReLink Linux build"
+          git config user.email "actions@users.noreply.github.com"
+          git merge --no-edit "${{ steps.check.outputs.new }}"
+          # (the tags go too: the AppImage workflow names each release after the newest upstream tag it contains)
+          git push origin --tags
+          git push origin HEAD:main
+
+      - name: Say what happened
+        run: |
+          if [ "${{ steps.check.outputs.new }}" = "no" ]; then
+            echo "### Nothing to do" >> "$GITHUB_STEP_SUMMARY"
+            echo "Upstream is still on \`${{ steps.check.outputs.ours }}\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Merged \`${{ steps.check.outputs.new }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "The Linux AppImage build starts on its own: it runs on every push to \`main\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
