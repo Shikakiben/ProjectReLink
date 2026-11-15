@@ -114,6 +114,16 @@ jobs:
           kill "$pid" 2>/dev/null || true
           echo "the window came up and stayed up"
 
+      # The button itself: v0.7.6 shipped with a window that opened and an Install that did nothing, because a Qt slot
+      # that raises is printed and then swallowed. Starting the window (above) cannot see that; this drives the slot
+      # with the builder stubbed out.
+      - name: The Install button does something
+        env:
+          RELINK_APPDIR: ${{ github.workspace }}/build-linux/AppDir
+        run: |
+          export QT_QPA_PLATFORM=offscreen
+          build-linux/AppDir/usr/python/bin/python3 scripts/linux/selftest.py
+
       - uses: actions/upload-artifact@v4
         with:
           name: ReLink-linux-x86_64

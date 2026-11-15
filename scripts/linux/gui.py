@@ -292,6 +292,7 @@ class StepRow(QWidget):
 
     def wait(self):
         self.state, self.running = "waiting", False
+        self.seconds = 0.0
         self.update()
 
     def begin(self):
@@ -762,6 +763,15 @@ class Window(QWidget):
 
     # ---- the build ----
     def start(self):
+        # (Qt prints an exception from a slot and carries on, so a broken start left a window whose button did nothing
+        #  at all: v0.7.6 did exactly that. Whatever goes wrong is now said out loud.)
+        try:
+            self._start()
+        except Exception as error:
+            QMessageBox.critical(self, "ReLink", "Cannot start the build:\n\n%s: %s" % (type(error).__name__, error))
+            raise
+
+    def _start(self):
         args = [PY, "-I", MK, "--out", self.out, "--language", self.lang.currentText().split(" ")[0]]
         if self.src == "nup":
             args += ["--nup", self.nup]
@@ -777,7 +787,6 @@ class Window(QWidget):
         self.files_changed, self.files_of, self.files_compiled = -1, 0, 0
         for row in self.step_rows.values():
             row.wait()
-            row.time.setText("")
             row.small_text("")
         self.build_sub.setText(self.out)
         self.log_shown = False
