@@ -10,6 +10,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+  actions: write   # (to ask for the AppImage build: see below)
 concurrency:
   group: follow-upstream
   cancel-in-progress: false
@@ -53,6 +54,15 @@ jobs:
           # (the tags go too: the AppImage workflow names each release after the newest upstream tag it contains)
           git push origin --tags
           git push origin HEAD:main
+
+      # A push made with GITHUB_TOKEN does NOT start another workflow: GitHub's anti-recursion rule, and the merge above
+      # is exactly that kind of push. So the build is asked for here, by name. (The first run of this workflow merged
+      # v0.7.6 and started nothing, which is how this was found.)
+      - name: Start the AppImage build
+        if: steps.check.outputs.new != 'no'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run linux-appimage.yml --repo "${{ github.repository }}" --ref main
 
       - name: Say what happened
         run: |
