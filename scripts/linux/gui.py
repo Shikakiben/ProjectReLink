@@ -581,32 +581,6 @@ class Window(QWidget):
         self.build_box.hide()
         left.addWidget(self.build_box)
 
-        # ---- once the game is built: the launcher's home, in the same column ----
-        self.home_box = QWidget()
-        home = QVBoxLayout(self.home_box)
-        home.setContentsMargins(0, 0, 0, 0)
-        home.setSpacing(0)
-        self.home_status = label("", 13, QFont.Weight.Normal, "InkSoft", wrap=True)
-        self.home_status.setFixedWidth(Staff.WIDTH)
-        home.addWidget(self.home_status)
-        home.addSpacing(14)
-        row = QHBoxLayout()
-        row.setSpacing(22)
-        self.play = Button("Play", "go")
-        self.play.setFixedWidth(300)
-        self.play.clicked.connect(self.play_game)
-        row.addWidget(self.play)
-        self.setup = Button("Set up the game", "link")
-        self.setup.clicked.connect(lambda: self.show_page(0))
-        row.addWidget(self.setup)
-        row.addStretch(1)
-        home.addLayout(row)
-        home.addSpacing(10)
-        self.home_note = label("", 12, QFont.Weight.Normal, Staff.BONE_FAINT, wrap=True)
-        self.home_note.setFixedWidth(Staff.WIDTH)
-        home.addWidget(self.home_note)
-        self.home_box.hide()
-        left.addWidget(self.home_box)
 
         left.addSpacing(12)
         foot = self.foot = QHBoxLayout()
@@ -779,20 +753,14 @@ class Window(QWidget):
         self.details.hide()
         self.cancel_link.hide()
 
-        self.right = QStackedWidget()
-        self.right.addWidget(panel)
-        self.right.addWidget(QWidget())      # (the home page: nothing on the right, the sky shows)
-        page.addWidget(self.right, 1)
+        page.addWidget(panel, 1)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # (nothing is focused on open: no ring on a button nobody asked for)
         self.setFocus()
         self.load_choices()
         self.show_page(0)   # (the setup page's own state: output closed, Cancel absent)
         self.refresh()
-        if self.out and os.access(os.path.join(self.out, "relink"), os.X_OK):
-            self.show_home()          # (a game is already built: the launcher opens on its home page)
-        else:
-            self.start_search()
+        self.start_search()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_tick)
         self.timer.start(100)
@@ -816,31 +784,15 @@ class Window(QWidget):
 
     # ---- the two pages ----
     def show_page(self, index):
-        """0: what to build from. 1: the build. 2: the game is built, play it."""
-        home = index == 2
-        self.right.setCurrentIndex(1 if home else 0)
-        self.home_box.setVisible(home)
-        if home:
-            # (the launcher's home: the notes are the game and the display, and the staff is theirs)
-            self.staff.set_items([("game", "Game"), ("pad", "Controller"), ("display", "Display")],
-                                 {"game": "Built", "pad": self.pad_note(), "display": self.display_note()})
-            self.staff.set(1.0)
-            self.rows_box.hide()
-            self.idle_box.hide()
-            self.build_box.hide()
-            self.version.hide()      # (the home page says the version itself, as the launcher does)
-            self.folder.show()
-            return
+        """0: what to build from. 1: the build."""
         self.staff.set_items([("read", "Read"), ("lift", "Translate"), ("compile", "Compile"),
                               ("finish", "Assemble")])
         self.staff.set(0.0)
-        self.version.show()
         self.pages.setCurrentIndex(index)
         building = index == 1
         # (the three rows stay: they say what is being installed while it installs, as the launcher's build page does)
         self.idle_box.setVisible(not building)
         self.build_box.setVisible(building)
-        self.home_box.setVisible(False)
         self.details.setVisible(True)              # ("Show details" is offered on both pages)
         self.cancel_link.setVisible(building)      # (Cancel only means something while a build runs)
         self.log.setVisible(self.log_shown)        # (closed until asked for: it took the whole page)
@@ -1070,47 +1022,6 @@ class Window(QWidget):
         except OSError:
             self.space_q.put("")
 
-    def display_note(self):
-        """What the screen will do while the game runs, as the launcher's home says it."""
-        try:
-            screen = self.screen() or QApplication.primaryScreen()
-            geo = screen.geometry()
-            return "%dx%d, %d Hz" % (geo.width(), geo.height(), round(screen.refreshRate()))
-        except Exception:
-            return ""
-
-    def pad_note(self):
-        """What the launcher's home says about the controller: on Linux, whether one is plugged in."""
-        try:
-            return "Gamepad" if glob.glob("/dev/input/js*") else "Keyboard and mouse"
-        except Exception:
-            return "Keyboard and mouse"
-
-    def play_game(self):
-        game = os.path.join(self.out or "", "relink")
-        if not os.access(game, os.X_OK):
-            QMessageBox.information(self, "ReLink", "There is no game in %s yet." % (self.out or "that folder"))
-            return
-        # The builder's own variables are dropped: the built game loads relink_vk.so and libSDL2-2.0.so.0 from beside
-        # itself, and an LD_LIBRARY_PATH, APPDIR or PYTHON* left over from the AppImage can make it pick the image's
-        # copies instead. The same list the Longshot builder's longshot-launch drops.
-        env = {k: v for k, v in os.environ.items()
-               if not (k.startswith(("RELINK_", "PYTHON", "APPDIR", "APPIMAGE", "ARGV0", "OWD")) or k == "LD_LIBRARY_PATH")}
-        env["RELINK_NO_UPDATE_CHECK"] = "1"
-        try:
-            subprocess.Popen([game], cwd=self.out, env=env)
-            self.show_page(0)
-        except OSError as error:
-            QMessageBox.critical(self, "ReLink", "Cannot start the game:\n\n%s" % error)
-
-    def show_home(self):
-        """The game is built: the launcher's own home page, and Play."""
-        version = updates.version(HERE) or "dev"
-        self.home_status.setText("Version %s, up to date." % version)
-        self.home_note.setText("Full screen, 60 frames a second: F11 and the game's own F1 menu change these while "
-                              "you play.")
-        self.show_page(2)
-
     def open_folder(self):
         if self.out and os.path.isdir(self.out):
             subprocess.Popen(["xdg-open", self.out])
@@ -1320,10 +1231,9 @@ class Window(QWidget):
         game = os.path.join(self.out, "relink")
         if code == 0 and os.access(game, os.X_OK):
             self.write("\n== done: %s ==\n" % game, "Go")
-            self.log_shown = False
-            self.details.setText("Show details")
-            # (the launcher ends an install on its home page, with Play under the game that was just built)
-            self.show_home()
+            self.log_shown = True
+            self.details.setText("Hide details")
+            self.show_page(0)
             self.state.setText("Built.")
         else:
             if self.stage_id in self.step_rows:
