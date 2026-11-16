@@ -69,11 +69,15 @@ jobs:
         run: gh workflow run linux-appimage.yml --repo "${{ github.repository }}" --ref main
 
       - name: Say what happened
+        if: steps.check.outputs.new != 'no'
         run: |
-          if [ "${{ steps.check.outputs.new }}" = "no" ]; then
-            echo "### Nothing to do" >> "$GITHUB_STEP_SUMMARY"
-            echo "Upstream is still on \`${{ steps.check.outputs.ours }}\`." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### Merged \`${{ steps.check.outputs.new }}\`" >> "$GITHUB_STEP_SUMMARY"
-            echo "The Linux AppImage build starts on its own: it runs on every push to \`main\`." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "### Merged \`${{ steps.check.outputs.new }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "The Linux AppImage build starts on its own: it runs on every push to \`main\`." >> "$GITHUB_STEP_SUMMARY"
+
+      # Four tries an hour that find nothing would fill the Actions tab with runs that did nothing. This one takes
+      # itself off the list, so what stays there is only the runs that merged something.
+      - name: Leave nothing behind when there was nothing to do
+        if: steps.check.outputs.new == 'no'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run delete "${{ github.run_id }}" --repo "${{ github.repository }}"
