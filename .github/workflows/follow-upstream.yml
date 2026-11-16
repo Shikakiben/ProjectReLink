@@ -5,8 +5,12 @@
 # AppImage is ever produced from a half-merged upstream.
 name: Follow upstream
 on:
+  # Four tries an hour, at :07, :22, :37 and :52. GitHub's scheduler is best effort: it delays runs when its runners
+  # are busy and DROPS some outright, most often at the top of the hour. One try an hour lost eight in a row on
+  # 2026-11-16 (02:47 then 11:34, while upstream had released v0.7.8 at 05:12), so there are four, off the hour.
+  # A try that finds nothing costs about twenty seconds and builds nothing.
   schedule:
-    - cron: "17 * * * *"   # every hour at :17 (GitHub delays scheduled runs when its runners are busy)
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 permissions:
   contents: write
