@@ -74,10 +74,23 @@ jobs:
           echo "### Merged \`${{ steps.check.outputs.new }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "The Linux AppImage build starts on its own: it runs on every push to \`main\`." >> "$GITHUB_STEP_SUMMARY"
 
-      # Four tries an hour that find nothing would fill the Actions tab with runs that did nothing. This one takes
-      # itself off the list, so what stays there is only the runs that merged something.
-      - name: Leave nothing behind when there was nothing to do
-        if: steps.check.outputs.new == 'no'
+      # Four tries an hour that find nothing would fill the Actions tab with runs that did nothing. A run cannot
+      # delete itself (GitHub answers 403 while it is in progress), so each try takes the EARLIER ones off the list:
+      # what stays is only the runs that merged a release, plus the one in progress.
+      - name: Take the earlier checks that found nothing off the list
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh run delete "${{ github.run_id }}" --repo "${{ github.repository }}"
+        run: |
+          repo="${{ github.repository }}"
+          gh api "repos/$repo/actions/workflows/follow-upstream.yml/runs?per_page=50" \
+            --jq ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id" 2>/dev/null |
+          while read -r id; do
+            [ -n "$id" ] || continue
+            merged=$(gh api "repos/$repo/actions/runs/$id/jobs" \
+                       --jq '[.jobs[].steps[] | select(.name == "Merge it into main") | .conclusion] | first // ""' 2>/dev/null)
+            if [ "$merged" = "skipped" ]; then
+              gh api -X DELETE "repos/$repo/actions/runs/$id" >/dev/null 2>&1 && echo "removed $id: it found nothing"
+            fi
+          done
+          echo "done"

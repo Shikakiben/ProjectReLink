@@ -6,6 +6,11 @@ name: Linux AppImage
 on:
   push:
     branches: [main]
+    # (a change to the CI itself, or to a document, does not change the AppImage: no build for those)
+    paths-ignore:
+      - ".github/**"
+      - "**/*.md"
+      - "docs/**"
   workflow_dispatch:
 permissions:
   contents: write
