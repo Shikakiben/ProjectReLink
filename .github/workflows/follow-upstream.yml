@@ -35,9 +35,11 @@ jobs:
           set -e
           git remote add upstream https://github.com/pixl27/ProjectReLink.git
           git fetch --quiet --tags upstream
-          # (only plain vX.Y.Z: the fork's older "-linux.N" tags are not versions, and neither is any other suffix)
-          upstream_tag=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-          ours=$(git tag --merged HEAD --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          # (only plain vX.Y.Z and vX.Y.Z.W: the fork's older "-linux.N" tags are not versions, and neither is any
+          #  other suffix. Upstream went to four numbers with v0.7.9.1, and a three-number pattern read that as v0.7.9,
+          #  so the check said "nothing to do" while upstream was a release ahead)
+          upstream_tag=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)*$' | head -1)
+          ours=$(git tag --merged HEAD --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)*$' | head -1)
           echo "upstream=$upstream_tag" >> "$GITHUB_OUTPUT"
           echo "ours=$ours" >> "$GITHUB_OUTPUT"
           if [ "$upstream_tag" = "$ours" ]; then
