@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdarg>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -19,12 +20,16 @@
 #include "vk_framegen.h"
 #include "vk_internal.h"
 #include "gpu_choice.h"
+#include "radv_submit_thread.h"
 #include "vk_menu.h"
 #include "vk_dlss.h"
 #include "vk_fsr.h"
 #include "vk_reflex.h"
 #include "vk_progress.h"
 #include "vk_push_fix.h"
+#ifdef _WIN32
+#include <dxgi1_6.h>   // (relink: HDR output, hdr_display)
+#endif
 
 namespace vkx {
 #define VKX_DEFINE(f) PFN_##f f;
@@ -78,6 +83,12 @@ void logf(const char* fmt, ...) {
     va_end(a);
     if (host) host->log(b);
 }
+
+// (relink) HDR output: VK_EXT_swapchain_colorspace enabled on the instance (the player asked for HDR and the loader has it), and
+// whether the swapchain now is HDR10 (A2B10G10R10, ST 2084) with the display's peak in nits (hdr_output, hdr_peak_nits)
+bool hdr_ext = false;
+std::atomic<int> hdr_state{0}, hdr_peak{0};
+bool hdr_display(float* peak);
 
 namespace {
 
@@ -184,6 +195,7 @@ bool has_extension(const std::vector<VkExtensionProperties>& all, const char* na
 }
 
 bool create_instance() {
+    reflex_enable_implicit_layer();
     uint32_t version = VK_API_VERSION_1_0;
     if (vkEnumerateInstanceVersion) vkEnumerateInstanceVersion(&version);
     if (version < VK_API_VERSION_1_3) {
@@ -218,6 +230,12 @@ bool create_instance() {
         std::vector<VkExtensionProperties> all(n);
         vkEnumerateInstanceExtensionProperties(nullptr, &n, all.data());
         dlss_instance_extensions(ext_list, all);
+        // (relink) HDR: the colour spaces of the ST 2084 swapchain, only when the HDR row is on (nothing changes otherwise)
+        if (hdr_wanted()) {
+            hdr_ext = has_extension(all, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+            if (hdr_ext) ext_list.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+            else logf("vk: HDR asked for, but the Vulkan loader has no VK_EXT_swapchain_colorspace: the picture stays SDR");
+        }
     }
     ci.enabledExtensionCount = (uint32_t)ext_list.size();
     ci.ppEnabledExtensionNames = ext_list.data();
@@ -586,8 +604,14 @@ bool create_device() {
         const bool pin = f13.subgroupSizeControl && sc.minSubgroupSize <= 32 && sc.maxSubgroupSize >= 32 && !getenv("RX_VK_NO_SUBGROUP_PIN");
         dev.sg32_stages = pin ? sc.requiredSubgroupSizeStages : 0;
         amd_gcn = dev.props.vendorID == 0x1002 && sc.minSubgroupSize == 64 && sc.maxSubgroupSize == 64;   // (issue 43)
-        logf("vk: subgroups: default %u lanes, %u-%u, pinned to 32 on stages %#x", sg.subgroupSize, sc.minSubgroupSize, sc.maxSubgroupSize,
-             (unsigned)dev.sg32_stages);
+        // (relink, Discord: Artspear, the dogs drawn without textures on an RX 6600) AMD's RDNA cards hold only compute work to 32
+        // lanes (requiredSubgroupSizeStages 0x20): their drawing stages run 64 wide where the driver likes, and a program's lane
+        // votes, ballots and shuffles, written for 32, mixed two groups. Such GPUs translate with the wide-warp form
+        const VkShaderStageFlags drawing = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        dev.big_warp = std::max(sg.subgroupSize, sc.maxSubgroupSize) > 32 && (dev.sg32_stages & drawing) != drawing &&
+                       !getenv("RX_VK_NO_BIG_WARP");
+        logf("vk: subgroups: default %u lanes, %u-%u, pinned to 32 on stages %#x%s", sg.subgroupSize, sc.minSubgroupSize, sc.maxSubgroupSize,
+             (unsigned)dev.sg32_stages, dev.big_warp ? "; the drawing stages may run wider: translated for it" : "");
     }
     if (!f13.dynamicRendering || !f13.synchronization2 || !f12.timelineSemaphore) {
         logf("vk: the GPU lacks dynamic rendering, synchronization2 or timeline semaphores");
@@ -614,7 +638,41 @@ bool create_device() {
     ci.pQueueCreateInfos = qs;
     ci.enabledExtensionCount = (uint32_t)want.size();
     ci.ppEnabledExtensionNames = want.data();
-    if (vkCreateDevice(dev.physical, &ci, nullptr, &dev.device) != VK_SUCCESS) {
+#ifndef _WIN32
+    // RADV can move the kernel submit off the replaying thread. Mesa reads this
+    // variable inside vkCreateDevice, so set it only for that call and restore
+    // the process environment immediately afterwards. A user's Mesa setting
+    // always wins; RX_VK_RADV_SUBMIT_THREAD=0 keeps Mesa's default behaviour.
+    VkPhysicalDeviceDriverProperties driver{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    properties.pNext = &driver;
+    vkGetPhysicalDeviceProperties2(dev.physical, &properties);
+    const auto submit_thread = radv_submit_thread::decide(driver.driverID == VK_DRIVER_ID_MESA_RADV,
+                                                          getenv("MESA_VK_ENABLE_SUBMIT_THREAD"),
+                                                          getenv("RX_VK_RADV_SUBMIT_THREAD"));
+    bool submit_thread_set = false;
+    switch (submit_thread) {
+    case radv_submit_thread::Choice::set_on:
+        submit_thread_set = setenv("MESA_VK_ENABLE_SUBMIT_THREAD", "1", 0) == 0;
+        logf("vk: RADV: Mesa submit thread %s (RX_VK_RADV_SUBMIT_THREAD=0: off)",
+             submit_thread_set ? "on" : "could not be enabled");
+        break;
+    case radv_submit_thread::Choice::user_set:
+        logf("vk: RADV: Mesa submit thread left as set by MESA_VK_ENABLE_SUBMIT_THREAD=%s",
+             getenv("MESA_VK_ENABLE_SUBMIT_THREAD"));
+        break;
+    case radv_submit_thread::Choice::switch_off:
+        logf("vk: RADV: Mesa submit thread left at its default (RX_VK_RADV_SUBMIT_THREAD=0)");
+        break;
+    case radv_submit_thread::Choice::not_radv:
+        break;
+    }
+#endif
+    const VkResult created = vkCreateDevice(dev.physical, &ci, nullptr, &dev.device);
+#ifndef _WIN32
+    if (submit_thread_set) unsetenv("MESA_VK_ENABLE_SUBMIT_THREAD");
+#endif
+    if (created != VK_SUCCESS) {
         logf("vk: vkCreateDevice failed");
         return false;
     }
@@ -682,6 +740,40 @@ bool create_swapchain(uint32_t width, uint32_t height) {
         if ((f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_R8G8B8A8_UNORM) &&
             f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
             fmt = f;
+    {   // (relink) HDR output: HDR10 words (the game's own HDR window textures are RGB10A2 holding PQ BT.2020: host/nn_vi.c tells
+        // it the display is HDR from hdr_output) when the row is on, the surface lists them and Windows' HDR is on for the display
+        bool hdr_now = false;
+        if (hdr_ext && hdr_wanted()) {
+            float peak = 0;
+            // (RX_VK_HDR_FORCE=1, tests: the display's answer left out, the surface's formats alone decide)
+            static const bool force = getenv("RX_VK_HDR_FORCE") && atoi(getenv("RX_VK_HDR_FORCE")) != 0;
+            const bool display_hdr = hdr_display(&peak) || force;
+            static bool listed = false;
+            if (!listed) {
+                listed = true;
+                std::string all;
+                for (const auto& f : formats) all += " " + std::to_string((int)f.format) + "/" + std::to_string((int)f.colorSpace);
+                logf("vk: HDR: the surface's formats (format/colour space):%s", all.c_str());
+            }
+            const VkSurfaceFormatKHR* found = nullptr;
+            for (const auto& f : formats)
+                if (f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 && f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) found = &f;
+            static int told = -1;
+            const int tell = !found ? 1 : !display_hdr ? 2 : 3;
+            if (tell != told) {
+                told = tell;
+                logf(tell == 1 ? "vk: HDR asked for, but this display's surface lists no HDR10 format: the picture stays SDR"
+                     : tell == 2 ? "vk: HDR asked for, but Windows' HDR is off for this display: the picture stays SDR"
+                                 : "vk: HDR output: HDR10 (ST 2084, BT.2020), the display's peak %.0f nits, paper white %d nits",
+                     peak > 0 ? peak : 1000.0f, hdr_paper_white_nits());
+            }
+            if (found && display_hdr) {
+                fmt = *found, hdr_now = true;
+                hdr_peak.store(peak > 0 ? (int)peak : 1000);
+            }
+        }
+        hdr_state.store(hdr_now ? 1 : 0);
+    }
     // mailbox when the driver has it (latest frame, no tear). The game paces itself (nn_vi.c).
     n = 0;
     result = vkGetPhysicalDeviceSurfacePresentModesKHR(dev.physical, dev.surface, &n, nullptr);
@@ -793,6 +885,52 @@ bool create_swapchain(uint32_t width, uint32_t height) {
 namespace {
 HWND main_window = nullptr;
 } // namespace
+
+bool hdr_wanted() {
+    static const int env = getenv("RX_VK_HDR") && *getenv("RX_VK_HDR") ? (atoi(getenv("RX_VK_HDR")) != 0 ? 1 : 0) : -1;
+    if (env >= 0) return env == 1;
+    menu_init();   // (the options file, once: create_instance asks before pick_device does)
+    return opts.hdr != 0;
+}
+bool hdr_output() { return hdr_state.load(std::memory_order_relaxed) == 1; }
+int hdr_peak_nits() {
+    const int p = hdr_peak.load(std::memory_order_relaxed);
+    return p > 0 ? p : 1000;
+}
+/// (relink) Whether Windows' HDR is on for the display the window is on (DXGI 1.6: its colour space is ST 2084 / BT.2020), and that
+/// display's peak brightness. True when it cannot be told (no DXGI 1.6, the display not found): the surface's formats decide then
+bool hdr_display(float* peak) {
+    *peak = 0;
+#ifdef _WIN32
+    HMONITOR mon = main_window ? MonitorFromWindow(main_window, MONITOR_DEFAULTTOPRIMARY) : nullptr;
+    static HMODULE dxgi = LoadLibraryA("dxgi.dll");
+    using Create = HRESULT(WINAPI*)(REFIID, void**);
+    const Create create = dxgi ? (Create)(void*)GetProcAddress(dxgi, "CreateDXGIFactory1") : nullptr;
+    IDXGIFactory1* factory = nullptr;
+    if (!mon || !create || FAILED(create(__uuidof(IDXGIFactory1), (void**)&factory)) || !factory) return true;
+    int on = -1;
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT a = 0; on < 0 && factory->EnumAdapters1(a, &adapter) == S_OK; a++) {
+        IDXGIOutput* out = nullptr;
+        for (UINT o = 0; on < 0 && adapter->EnumOutputs(o, &out) == S_OK; o++) {
+            IDXGIOutput6* out6 = nullptr;
+            DXGI_OUTPUT_DESC1 d{};
+            if (SUCCEEDED(out->QueryInterface(__uuidof(IDXGIOutput6), (void**)&out6)) && out6 && SUCCEEDED(out6->GetDesc1(&d)) &&
+                d.Monitor == mon) {
+                on = d.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ? 1 : 0;
+                *peak = d.MaxLuminance;
+            }
+            if (out6) out6->Release();
+            out->Release();
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return on != 0;
+#else
+    return true;
+#endif
+}
 
 std::atomic<int> presents_shown{0};
 std::atomic<int> low_cap_mfps{0};
