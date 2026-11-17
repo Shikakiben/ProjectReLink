@@ -557,7 +557,7 @@ class Window(QWidget):
         idle.setSpacing(0)
         self.go = Button("Install", "go")
         self.go.setFixedWidth(300)
-        self.go.clicked.connect(self.start)
+        self.go.clicked.connect(self.go_clicked)
         self.go.setEnabled(False)
         idle.addWidget(self.go)
         idle.addSpacing(10)
@@ -1022,15 +1022,59 @@ class Window(QWidget):
         except OSError:
             self.space_q.put("")
 
+    def play_game(self):
+        game = os.path.join(self.out or "", "relink")
+        if not os.access(game, os.X_OK):
+            QMessageBox.information(self, "ReLink", "There is no game in %s yet." % (self.out or "that folder"))
+            return
+        # The builder's own variables are dropped: the built game loads relink_vk.so and libSDL2-2.0.so.0 from beside
+        # itself, and an LD_LIBRARY_PATH, APPDIR or PYTHON* left over from the AppImage can make it pick the image's
+        # copies instead. The same list the Longshot builder's longshot-launch drops.
+        env = {k: v for k, v in os.environ.items()
+               if not (k.startswith(("RELINK_", "PYTHON", "APPDIR", "APPIMAGE", "ARGV0", "OWD")) or k == "LD_LIBRARY_PATH")}
+        env["RELINK_NO_UPDATE_CHECK"] = "1"
+        try:
+            subprocess.Popen([game], cwd=self.out, env=env)
+        except OSError as error:
+            QMessageBox.critical(self, "ReLink", "Cannot start the game:\n\n%s" % error)
+
     def open_folder(self):
         if self.out and os.path.isdir(self.out):
             subprocess.Popen(["xdg-open", self.out])
 
+    def game_version(self):
+        """The version the game in the folder was built with (relink_version.txt, written by make_game.py)."""
+        try:
+            with open(os.path.join(self.out, "relink_version.txt"), encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("version="):
+                        return line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+        return ""
+
+    def up_to_date(self):
+        """The game in the folder was built by THIS AppImage.
+
+        A new AppImage carries a new version, so its game folder's relink_version.txt no longer matches: the button
+        says Install again and the build updates the game. That is the whole point of comparing them."""
+        mine = updates.version(HERE)
+        return bool(mine) and mine != "dev" and self.game_version() == mine
+
+    def go_clicked(self):
+        if self.up_to_date():
+            self.play_game()
+        else:
+            self.start()
+
     def ready(self):
+        if self.up_to_date():
+            return os.access(os.path.join(self.out, "relink"), os.X_OK)
         have = bool(self.nup) if self.src == "nup" else bool(self.romfs and self.exefs)
         return have and bool(self.out)
 
     def refresh(self):
+        self.go.setText("Play" if self.up_to_date() else "Install")
         self.go.setEnabled(self.ready() and not self.proc)
         self.folder.setEnabled(bool(self.out) and os.path.isdir(self.out))
         self.rows["copy"].setText(os.path.basename(self.nup) if self.src == "nup" and self.nup
@@ -1047,7 +1091,15 @@ class Window(QWidget):
             missing.append("the romfs and exefs folders")
         if not self.out:
             missing.append("where to build")
-        self.state.setText(("Choose " + ", ".join(missing) + ".") if missing else "Ready.")
+        if self.up_to_date():
+            self.state.setText("Built with %s, this version." % self.game_version())
+        elif missing:
+            self.state.setText("Choose " + ", ".join(missing) + ".")
+        elif self.game_version():
+            self.state.setText("Built with %s; this is %s. Install to update it."
+                               % (self.game_version(), updates.version(HERE)))
+        else:
+            self.state.setText("Ready.")
 
     # ---- the update offer ----
     def offer_update(self, tag, page):
@@ -1234,7 +1286,9 @@ class Window(QWidget):
             self.log_shown = True
             self.details.setText("Hide details")
             self.show_page(0)
-            self.state.setText("Built.")
+            self.refresh()          # (the button becomes Play: this AppImage built it)
+            if QMessageBox.question(self, "ReLink", "The game is built in\n%s\n\nPlay it now?" % self.out) == QMessageBox.StandardButton.Yes:
+                self.play_game()
         else:
             if self.stage_id in self.step_rows:
                 self.step_rows[self.stage_id].stopped()
