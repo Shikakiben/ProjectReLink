@@ -12,6 +12,7 @@ as a failure instead of a silent button.
 """
 import os
 import sys
+import threading
 
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
@@ -23,15 +24,33 @@ from PySide6.QtWidgets import QApplication
 
 
 class FakeProcess:
-    """Stands in for the builder: start() only needs to not fail, and read() only needs an empty stream."""
+    """Stands in for the builder: start() only needs to not fail, and read() only needs a stream that does not end.
 
-    stdout = ()
+    A stream that ended at once made read() queue its None at once, and the next 100 ms tick called done(): the page
+    moved before the test looked at it (and a real build never ends in the same breath as it starts)."""
+
+    def __init__(self):
+        self.stdout = _Never()
 
     def poll(self):
         return None
 
     def terminate(self):
         pass
+
+
+class _Never:
+    """An output stream that never yields and never ends: the build keeps running, as far as the window knows."""
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        _never.wait()
+        raise StopIteration
+
+
+_never = threading.Event()
 
 
 def main():
@@ -95,7 +114,31 @@ def main():
         print("selftest: Install did not start the builder", file=sys.stderr)
         return 1
 
-    print("selftest: the window starts, every step and the bar move, and Install opens the installation page")
+    # the ready page: the button says Play, and the line under it the version
+    w.proc = None
+    w.show_ready()
+    app.processEvents()
+    if w.pages.currentIndex() != 2 or w.go.text() != "Play":
+        print("selftest: the ready page did not come up with Play", file=sys.stderr)
+        return 1
+
+    # the problem page: what went wrong, and a report to copy
+    w.show_problem("the selftest's own reason")
+    app.processEvents()
+    if w.pages.currentIndex() != 3 or "the selftest's own reason" not in w.problem_text.text():
+        print("selftest: the problem page did not say what went wrong", file=sys.stderr)
+        return 1
+    w.copy_report()
+    if "the selftest's own reason" not in QApplication.clipboard().text():
+        print("selftest: Copy for a report copied nothing", file=sys.stderr)
+        return 1
+    w.toggle_problem_log()
+    if not w.problem_log.isVisible():
+        print("selftest: Show details on the problem page did nothing", file=sys.stderr)
+        return 1
+
+    print("selftest: the window starts, every step and the bar move, Install opens the installation page, "
+          "the ready page says Play, and the problem page explains and copies")
     return 0
 
 

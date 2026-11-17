@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import webbrowser
 
 # Before Qt is imported, two things:
@@ -93,6 +94,63 @@ def exec_field(path):
 def shortcuts():
     """The two files, whether or not they exist: (desktop, menu)."""
     return (os.path.join(desktop_dir(), DESKTOP_NAME), os.path.join(menu_dir(), MENU_NAME))
+
+
+# ---- what ReLink keeps on this PC, as launcher/Storage.cs says it: the game folder, and the build files ----
+# make_game.py's own default (nx2/make_game.py's --work): the translated code and its compiled objects. None of it is
+# needed to play; it only makes the next install quicker.
+WORK = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "relink-builder")
+
+
+def dir_size(path):
+    """The bytes under a folder, the same way du counts them ('~/.cache/relink-builder' is already big)."""
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def human(n):
+    return "%.1f GB" % (n / (1 << 30)) if n >= (1 << 30) else "%d MB" % (n >> 20)
+
+
+def lasted(seconds):
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        return "%d h %d min" % (seconds // 3600, seconds % 3600 // 60)
+    if seconds >= 60:
+        return "%d min" % (seconds // 60)
+    return "%d s" % seconds
+
+
+def os_label():
+    """The distribution and kernel, for a report: no subprocess, so the window's own patch of Popen cannot break it."""
+    name = ""
+    try:
+        with open("/etc/os-release", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("PRETTY_NAME="):
+                    name = line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    u = os.uname()
+    return ("%s (%s %s)" % (name, u.sysname, u.release)) if name else ("%s %s" % (u.sysname, u.release))
+
+
+def log_style():
+    """The builder's own output, and the problem page's (both are a plain text view of the same log)."""
+    return ("QPlainTextEdit { color: %s; background: rgba(0,0,0,26); border: 1px solid rgba(255,255,255,18);"
+            " border-radius: 8px; padding: 10px; selection-background-color: %s; }"
+            "QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }"
+            "QScrollBar::handle:vertical { background: rgba(255,255,255,40); border-radius: 3px; min-height: 24px; }"
+            "QScrollBar::handle:vertical:hover { background: rgba(255,255,255,70); }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+            % (css(C["InkSoft"]), css(C["Brand"])))
 
 
 LANGUAGES = [
@@ -537,6 +595,11 @@ class Window(QWidget):
         self.out = ""
         self.stage_id = None
         self.log_shown = False
+        self.started_at = 0.0
+        self.was_update = False
+        self.cancelled = False
+        self.last_error = ""
+        self.showing = 0
         self.dump_q = queue.Queue()      # (the search's finds, from its thread)
         self.check_q = queue.Queue()     # (each file's build id, from the check's thread)
         self.space_q = queue.Queue()     # (the free space under the install folder)
@@ -779,21 +842,93 @@ class Window(QWidget):
         s1.addStretch(1)
         self.pages.addWidget(running)
 
+        # ---- page 2: the game is ready, as the launcher's ReadyView ----
+        ready = QWidget()
+        s2 = QVBoxLayout(ready)
+        s2.setContentsMargins(0, 0, 0, 0)
+        s2.setSpacing(10)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        self.ready_title = QLabel("The game is ready")
+        self.ready_title.setFont(display(27))
+        self.ready_title.setStyleSheet("color: %s; background: transparent;" % css(C["Ink"]))
+        head.addWidget(self.ready_title, 0, Qt.AlignmentFlag.AlignVCenter)
+        head.addStretch(1)
+        head.addWidget(Chip("installed", "Go", "GoSoft"), 0, Qt.AlignmentFlag.AlignVCenter)
+        s2.addLayout(head)
+        self.ready_note = label("", 14, QFont.Weight.Normal, "InkSoft", wrap=True)
+        s2.addWidget(self.ready_note)
+        s2.addWidget(hairline())
+        s2.addWidget(label("WHAT IT KEEPS", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
+        self.storage_note = label("", 13, QFont.Weight.Normal, "InkSoft", wrap=True)
+        s2.addWidget(self.storage_note)
+        self.free_link = Button("Free up this space", "link")
+        self.free_link.clicked.connect(self.free_space)
+        s2.addWidget(self.free_link, 0, Qt.AlignmentFlag.AlignLeft)
+        s2.addWidget(hairline())
+        s2.addWidget(label("THE FIRST START", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
+        s2.addWidget(label("It is long, once (about a quarter of an hour on a mid-range PC): the game gets ready for "
+                           "your graphics card, with a loading screen. Your saves are not touched.",
+                           13, QFont.Weight.Normal, "InkSoft", wrap=True))
+        s2.addStretch(1)
+        links2 = QHBoxLayout()
+        again = Button("Install again…", "link")
+        again.clicked.connect(lambda: self.show_page(0))
+        links2.addWidget(again)
+        links2.addStretch(1)
+        s2.addLayout(links2)
+        self.pages.addWidget(ready)
+
+        # ---- page 3: when something goes wrong, as the launcher's ProblemView ----
+        problem = QWidget()
+        s3 = QVBoxLayout(problem)
+        s3.setContentsMargins(0, 0, 0, 0)
+        s3.setSpacing(10)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        self.problem_title = QLabel("The install stopped")
+        self.problem_title.setFont(display(27))
+        self.problem_title.setStyleSheet("color: %s; background: transparent;" % css(C["Ink"]))
+        head.addWidget(self.problem_title, 0, Qt.AlignmentFlag.AlignVCenter)
+        head.addStretch(1)
+        head.addWidget(Chip("stopped", "Bad", "BadSoft"), 0, Qt.AlignmentFlag.AlignVCenter)
+        s3.addLayout(head)
+        self.problem_sub = label("", 13, QFont.Weight.Normal, "InkSoft", wrap=True)
+        s3.addWidget(self.problem_sub)
+        s3.addWidget(hairline())
+        s3.addWidget(label("WHAT WENT WRONG", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
+        self.problem_text = label("", 13, QFont.Weight.Normal, "Ink", wrap=True)
+        self.problem_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        s3.addWidget(self.problem_text)
+        self.problem_log = QPlainTextEdit()
+        self.problem_log.setReadOnly(True)
+        self.problem_log.setFont(font(12, family=T.MONO))
+        self.problem_log.setStyleSheet(log_style())
+        self.problem_log.hide()
+        s3.addWidget(self.problem_log, 1)
+        s3.addStretch(1)
+        links3 = QHBoxLayout()
+        links3.setSpacing(22)
+        self.problem_details = Button("Show details", "link")
+        self.problem_details.clicked.connect(self.toggle_problem_log)
+        links3.addWidget(self.problem_details)
+        self.copy_link = Button("Copy for a report", "link")
+        self.copy_link.clicked.connect(self.copy_report)
+        links3.addWidget(self.copy_link)
+        links3.addStretch(1)
+        s3.addLayout(links3)
+        retry = Button("Try again", "quiet")
+        retry.clicked.connect(lambda: self.show_page(0))
+        s3.addWidget(retry, 0, Qt.AlignmentFlag.AlignLeft)
+        self.pages.addWidget(problem)
+
         v.addWidget(self.pages, 0)
 
         # ---- the builder's own output, behind "Show details" while it runs ----
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setFont(font(12, family=T.MONO))
-        self.log.setStyleSheet(
-            "QPlainTextEdit { color: %s; background: rgba(0,0,0,26); border: 1px solid rgba(255,255,255,18);"
-            " border-radius: 8px; padding: 10px; selection-background-color: %s; }"
-            "QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }"
-            "QScrollBar::handle:vertical { background: rgba(255,255,255,40); border-radius: 3px; min-height: 24px; }"
-            "QScrollBar::handle:vertical:hover { background: rgba(255,255,255,70); }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
-            % (css(C["InkSoft"]), css(C["Brand"])))
+        self.log.setStyleSheet(log_style())
         self.log.setMinimumHeight(150)
         self.log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         v.addWidget(self.log, 1)
@@ -842,18 +977,23 @@ class Window(QWidget):
 
     # ---- the two pages ----
     def show_page(self, index):
-        """0: what to build from. 1: the build."""
-        self.staff.set_items([("read", "Read"), ("lift", "Translate"), ("compile", "Compile"),
-                              ("finish", "Assemble")])
-        self.staff.set(0.0)
+        """0: what to build from. 1: the build. 2: the game is ready. 3: it stopped (launcher/MainWindow.xaml.cs: View)."""
+        if index in (0, 1):
+            self.staff.set_items([("read", "Read"), ("lift", "Translate"), ("compile", "Compile"),
+                                  ("finish", "Assemble")])
+            self.staff.set(0.0)
         self.pages.setCurrentIndex(index)
         building = index == 1
+        ready = index == 2
         # (the three rows stay: they say what is being installed while it installs, as the launcher's build page does)
         self.idle_box.setVisible(not building)
         self.build_box.setVisible(building)
-        self.details.setVisible(True)              # ("Show details" is offered on both pages)
+        self.details.setVisible(index in (0, 1))   # ("Show details" is offered on the setup and build pages)
         self.cancel_link.setVisible(building)      # (Cancel only means something while a build runs)
-        self.log.setVisible(self.log_shown)        # (closed until asked for: it took the whole page)
+        self.log.setVisible(self.log_shown and index in (0, 1))
+        if ready:
+            self.go.setText("Play")
+        self.showing = index
 
     def toggle_log(self):
         self.log_shown = not self.log_shown
@@ -1199,6 +1339,8 @@ class Window(QWidget):
         self.rows["lang"].setText(self.lang.currentText().split(" — ")[-1])
         if self.proc:
             return
+        if self.showing in (2, 3):
+            return          # (the ready and problem pages set their own line under the button)
         missing = []
         if self.src == "nup" and not self.nup:
             missing.append("your .nup")
@@ -1215,6 +1357,75 @@ class Window(QWidget):
                                % (self.game_version(), updates.version(HERE)))
         else:
             self.state.setText("Ready.")
+
+    # ---- the game is ready, and what ReLink keeps (launcher/Install.cs: ShowReady, ShowStorageUse) ----
+    def show_ready(self):
+        took = (time.time() - self.started_at) if self.started_at else 0
+        self.ready_title.setText("Your game is updated" if self.was_update else "The game is ready")
+        self.ready_note.setText(("Updated in %s" if self.was_update else "Installed in %s") % lasted(took)
+                                + " in %s." % self.out)
+        self.storage_use()
+        self.show_page(2)
+        self.refresh()
+        # (the launcher's ReadyView: every step done, the button says Play, the line under it the version)
+        for row in self.step_rows.values():
+            row.done()
+        self.staff.set(1.0)
+        self.go.setText("Play")
+        self.go.setEnabled(os.access(os.path.join(self.out, "relink"), os.X_OK))
+        self.state.setText("Version %s." % (self.game_version() or updates.version(HERE)))
+
+    def storage_use(self):
+        """The game folder, and the build files: what they weigh, and whether they can go."""
+        game = self.out or ""
+        g = dir_size(game) if game and os.path.isdir(game) else 0
+        w = dir_size(WORK) if os.path.isdir(WORK) else 0
+        if w >= (100 << 20):
+            self.storage_note.setText(
+                "The game folder holds %s. The build files hold %s in %s; they only make the next install quicker "
+                "and can be freed: the game keeps playing." % (human(g), human(w), WORK))
+        else:
+            self.storage_note.setText("The game folder holds %s. No build files are left over." % human(g))
+        self.free_link.setVisible(w >= (100 << 20))
+
+    def free_space(self):
+        """The build files go: the translated code and its compiled objects, nothing the game plays from."""
+        self.free_link.setEnabled(False)
+        self.free_link.setText("Freeing…")
+        shutil.rmtree(WORK, ignore_errors=True)
+        left = dir_size(WORK) if os.path.isdir(WORK) else 0
+        self.free_link.setText("Free up this space")
+        self.free_link.setEnabled(True)
+        self.storage_use()
+        if left >= (100 << 20):
+            self.storage_note.setText(self.storage_note.text()
+                                      + " (%s could not be deleted: a file is in use. Close the game and try again.)"
+                                      % human(left))
+
+    # ---- when something goes wrong (launcher/Install.cs: ShowProblem) ----
+    def show_problem(self, why):
+        self.problem_title.setText("The update stopped" if self.was_update else "The install stopped")
+        self.problem_sub.setText("Your current game is unchanged and still plays." if self.was_update
+                                 else "Nothing in your game folder was changed.")
+        self.problem_text.setText(why or "The build stopped without saying why.")
+        self.problem_log.setPlainText(self.log.toPlainText())
+        self.problem_log.hide()
+        self.problem_details.setText("Show details")
+        self.show_page(3)
+        self.state.setText("Its log is in %s/build.log." % self.out if self.out else "")
+
+    def toggle_problem_log(self):
+        show = not self.problem_log.isVisible()
+        self.problem_log.setVisible(show)
+        self.problem_details.setText("Hide details" if show else "Show details")
+
+    def copy_report(self):
+        lines = self.log.toPlainText().split("\n")
+        text = ("Project ReLink %s on %s\n%s: %s\n\n%s"
+                % (updates.version(HERE), os_label(), self.problem_title.text(),
+                   self.problem_text.text(), "\n".join(lines[-200:])))
+        QApplication.clipboard().setText(text)
+        self.copy_link.setText("Copied")
 
     # ---- the update offer ----
     def offer_update(self, tag, page):
@@ -1251,6 +1462,10 @@ class Window(QWidget):
 
         # (the launcher's build page: every step waiting, the log behind "Show details")
         self.stage_id = None
+        self.started_at = time.time()
+        self.was_update = bool(self.game_version())
+        self.cancelled = False
+        self.last_error = ""
         self.files_changed, self.files_of, self.files_compiled = -1, 0, 0
         for row in self.step_rows.values():
             row.wait()
@@ -1372,6 +1587,7 @@ class Window(QWidget):
                         self.staff.set_problem()
                         if self.stage_id in self.step_rows:
                             self.step_rows[self.stage_id].stopped()
+                        self.last_error = rest
                         self.write("\n!! " + rest + "\n", "Bad")
                 else:
                     self.write(line + "\n")
@@ -1382,6 +1598,7 @@ class Window(QWidget):
         if self.proc and self.proc.poll() is None:
             if QMessageBox.question(self, "ReLink", "Stop the build?") != QMessageBox.StandardButton.Yes:
                 return
+            self.cancelled = True
             self.proc.terminate()
             self.note.setText("Stopping…")
 
@@ -1396,23 +1613,26 @@ class Window(QWidget):
             for row in self.step_rows.values():
                 row.done()
         game = os.path.join(self.out, "relink")
+        if self.cancelled:
+            self.cancelled = False
+            self.show_page(0)
+            self.state.setText("Build stopped. Nothing in your game folder was changed."
+                               if not self.was_update else "Update stopped. Your game still plays.")
+            return
         if code == 0 and os.access(game, os.X_OK):
             self.write("\n== done: %s ==\n" % game, "Go")
-            self.log_shown = True
-            self.details.setText("Hide details")
-            self.show_page(0)
-            self.refresh()          # (the button becomes Play: this AppImage built it; the ticks become usable)
+            self.log_shown = False
+            self.details.setText("Show details")
             self.sync_shortcuts()   # (the ticks' files, as launcher/Finder.cs's RefreshShortcuts after an update)
-            if QMessageBox.question(self, "ReLink", "The game is built in\n%s\n\nPlay it now?" % self.out) == QMessageBox.StandardButton.Yes:
-                self.play_game()
+            self.show_ready()
         else:
             if self.stage_id in self.step_rows:
                 self.step_rows[self.stage_id].stopped()
-            self.log_shown = True
-            self.details.setText("Hide details")
-            self.show_page(0)
-            self.state.setText("The build did not finish.")
-            QMessageBox.critical(self, "ReLink", "The build did not finish. Its log is in\n%s/build.log" % self.out)
+            why = self.last_error or "The build stopped without saying why."
+            self.last_error = ""
+            self.log_shown = False
+            self.details.setText("Show details")
+            self.show_problem(why)
 
 
 def main():
