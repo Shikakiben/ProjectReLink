@@ -49,12 +49,51 @@ import finder
 import scene
 import theme as T
 import updates
-from theme import C, Button, Chip, Choice, PathEdit, css, font
+from theme import C, Button, Chip, Choice, PathEdit, Tick, css, font
 
 HERE = os.path.normpath(_appdir)
 CHOICES = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "relink", "install.json")
 PY = os.path.join(HERE, "usr", "python", "bin", "python3")
 MK = os.path.join(HERE, "usr", "share", "relink", "nx2", "make_game.py")
+
+# ---- the game's shortcuts, as launcher/Finder.cs's Shortcuts makes Windows' .lnk (the same two switches, both on) ----
+# A .desktop file does what a .lnk does: Exec the game, Path its folder (it loads relink_options.ini and
+# libSDL2-2.0.so.0 from there), Icon relink.png beside it, which is also the game window's own icon
+# (host/posix/display_sdl.c).
+DESKTOP_NAME = "Project ReLink.desktop"
+MENU_NAME = "project-relink.desktop"
+
+
+def desktop_dir():
+    """The desktop: xdg-user-dir names it (a French session's is ~/Bureau), then ~/Desktop, then ~/Bureau."""
+    try:
+        out = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True, timeout=5).stdout.strip()
+        if out and os.path.isdir(out):
+            return out
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for name in ("Desktop", "Bureau"):
+        d = os.path.join(os.path.expanduser("~"), name)
+        if os.path.isdir(d):
+            return d
+    return os.path.join(os.path.expanduser("~"), "Desktop")
+
+
+def menu_dir():
+    return os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "applications")
+
+
+def exec_field(path):
+    """Exec= takes a path quoted when it holds anything but plain characters (the Desktop Entry spec's own rule)."""
+    if re.fullmatch(r"[A-Za-z0-9_./+-]+", path):
+        return path
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$") + '"'
+
+
+def shortcuts():
+    """The two files, whether or not they exist: (desktop, menu)."""
+    return (os.path.join(desktop_dir(), DESKTOP_NAME), os.path.join(menu_dir(), MENU_NAME))
+
 
 LANGUAGES = [
     ("en-US", "English (US)"), ("en-GB", "English (UK)"), ("fr", "Français"),
@@ -697,6 +736,25 @@ class Window(QWidget):
         row.addWidget(self.lang)
         row.addStretch(1)
         s0.addLayout(row)
+
+        s0.addWidget(hairline())
+
+        # ---- 4. the shortcuts, as the launcher's install page: both made by default, none before the game exists ----
+        s0.addWidget(label("SHORTCUTS", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
+        ticks = QHBoxLayout()
+        ticks.setSpacing(22)
+        self.tick_desktop = Tick("Desktop shortcut", True)
+        self.tick_desktop.clicked.connect(self.sync_shortcuts)
+        ticks.addWidget(self.tick_desktop)
+        self.tick_menu = Tick("Application menu entry", True)
+        self.tick_menu.clicked.connect(self.sync_shortcuts)
+        ticks.addWidget(self.tick_menu)
+        ticks.addStretch(1)
+        s0.addLayout(ticks)
+        self.shortcuts_note = label("Written when the game is built, and they open it. Untick to remove one.",
+                                    12, QFont.Weight.Normal, Staff.BONE_FAINT, wrap=True)
+        s0.addWidget(self.shortcuts_note)
+
         s0.addStretch(1)
         self.pages.addWidget(setup)
 
@@ -1042,6 +1100,62 @@ class Window(QWidget):
         if self.out and os.path.isdir(self.out):
             subprocess.Popen(["xdg-open", self.out])
 
+    # ---- the game's shortcuts: .desktop files, as launcher/Finder.cs makes Windows' .lnk ----
+
+    def game_icon(self):
+        """relink.png beside the game, which is also its window icon (host/posix/display_sdl.c). make_game.py writes
+        it there, but an AppImage that did not ship assets/ left older folders without one: the image's own copy
+        goes in then, so the shortcut and the game's window both get it."""
+        if not self.out:
+            return ""
+        icon = os.path.join(self.out, "relink.png")
+        if not os.path.exists(icon):
+            src = os.path.join(HERE, "relink.png")
+            try:
+                if os.path.exists(src):
+                    shutil.copy2(src, icon)
+            except OSError:
+                return ""
+        return icon if os.path.exists(icon) else ""
+
+    def sync_shortcuts(self, *_):
+        """Made or removed as the two ticks say (launcher/Finder.cs's Shortcuts). A folder with no game gets neither:
+        there is nothing to point at, and the ticks stay disabled until one is built."""
+        game = os.path.join(self.out or "", "relink") if self.out else ""
+        have = bool(game) and os.access(game, os.X_OK)
+        icon = self.game_icon() if have else ""
+        text = ("[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Project ReLink\n"
+                "Comment=Ocarina of Time on PC, with Project ReLink\n"
+                "Exec=%s\n"
+                "Path=%s\n"
+                "Icon=%s\n"
+                "Terminal=false\n"
+                "Categories=Game;\n")
+        for tick, path in zip((self.tick_desktop, self.tick_menu), shortcuts()):
+            try:
+                if not (have and tick.isChecked()):
+                    if os.path.exists(path):
+                        os.remove(path)
+                    continue
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(text % (exec_field(game), self.out, icon or "applications-games"))
+                os.chmod(path, 0o755)   # (some file managers will not launch a .desktop without the bit)
+                if os.path.dirname(path) == desktop_dir():
+                    # (GNOME asks "Untrusted application launcher" on every click without this; a no-op elsewhere)
+                    subprocess.run(["gio", "set", path, "metadata::trusted", "true"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError as error:
+                print("shortcut %s: %s" % (path, error))
+
+    def refresh_shortcut_state(self):
+        """The ticks are usable once there is a game to point at, as the launcher's ready rows appear after a build."""
+        have = bool(self.out) and os.access(os.path.join(self.out or "", "relink"), os.X_OK)
+        self.tick_desktop.setEnabled(have)
+        self.tick_menu.setEnabled(have)
+
     def game_version(self):
         """The version the game in the folder was built with (relink_version.txt, written by make_game.py)."""
         try:
@@ -1077,6 +1191,7 @@ class Window(QWidget):
         self.go.setText("Play" if self.up_to_date() else "Install")
         self.go.setEnabled(self.ready() and not self.proc)
         self.folder.setEnabled(bool(self.out) and os.path.isdir(self.out))
+        self.refresh_shortcut_state()
         self.rows["copy"].setText(os.path.basename(self.nup) if self.src == "nup" and self.nup
                                   else (os.path.basename(self.romfs) + " + " + os.path.basename(self.exefs)
                                         if self.src == "folders" and self.romfs and self.exefs else "—"))
@@ -1286,7 +1401,8 @@ class Window(QWidget):
             self.log_shown = True
             self.details.setText("Hide details")
             self.show_page(0)
-            self.refresh()          # (the button becomes Play: this AppImage built it)
+            self.refresh()          # (the button becomes Play: this AppImage built it; the ticks become usable)
+            self.sync_shortcuts()   # (the ticks' files, as launcher/Finder.cs's RefreshShortcuts after an update)
             if QMessageBox.question(self, "ReLink", "The game is built in\n%s\n\nPlay it now?" % self.out) == QMessageBox.StandardButton.Yes:
                 self.play_game()
         else:

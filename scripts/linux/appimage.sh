@@ -38,7 +38,7 @@ T=$APPDIR/usr/share/relink
 L=$APPDIR/usr/lib/relink
 
 # ---- the tools (the sources the player's build compiles, and the scripts) ----
-cp -a nx2 host gpu third_party tools scripts LICENSE README.md "$T/"
+cp -a nx2 host gpu third_party tools scripts assets LICENSE README.md "$T/"
 printf '%s\n' "$VERSION" > "$T/VERSION"
 find "$T" -name __pycache__ -prune -exec rm -rf {} +
 chmod +x "$T/scripts/linux/gui.py" 2>/dev/null || true
