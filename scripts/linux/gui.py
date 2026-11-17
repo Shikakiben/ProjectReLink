@@ -100,6 +100,37 @@ def shortcuts():
 # make_game.py's own default (nx2/make_game.py's --work): the translated code and its compiled objects. None of it is
 # needed to play; it only makes the next install quicker.
 WORK = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "relink-builder")
+# (where the player said the build files go: launcher/Storage.cs keeps its choice the same way, in a file beside it)
+WORK_CHOICE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "relink", "work.txt")
+
+
+def work_dir():
+    """The build files' folder, passed to make_game.py's --work: the player's choice, else make_game.py's own default."""
+    try:
+        with open(WORK_CHOICE, encoding="utf-8") as f:
+            chosen = f.read().strip()
+        if len(chosen) > 2 and os.path.isabs(chosen):
+            return chosen
+    except OSError:
+        pass
+    return WORK
+
+
+def set_work_dir(picked):
+    """picked: the folder the player chose (a "ReLink build files" folder goes inside it, as launcher/Storage.cs), or
+    None for make_game.py's own default."""
+    if picked is None:
+        try:
+            os.remove(WORK_CHOICE)
+        except OSError:
+            pass
+        return WORK
+    target = os.path.join(picked, "ReLink build files")
+    os.makedirs(target, exist_ok=True)
+    os.makedirs(os.path.dirname(WORK_CHOICE), exist_ok=True)
+    with open(WORK_CHOICE, "w", encoding="utf-8", newline="\n") as f:
+        f.write(target + "\n")
+    return target
 
 
 def dir_size(path):
@@ -787,6 +818,22 @@ class Window(QWidget):
 
         s0.addWidget(hairline())
 
+        # ---- the build files' folder, as launcher/Storage.cs's work.txt: they only make the next install quicker ----
+        s0.addWidget(label("BUILD FILES", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.work_note = label("", 12, QFont.Weight.Normal, Staff.BONE_FAINT, wrap=True)
+        row.addWidget(self.work_note, 1)
+        b = Button("Change…", "quiet")
+        b.clicked.connect(self.pick_work)
+        row.addWidget(b, 0, Qt.AlignmentFlag.AlignTop)
+        s0.addLayout(row)
+        self.work_reset = Button("Use the default", "link")
+        self.work_reset.clicked.connect(lambda: self.choose_work(None))
+        s0.addWidget(self.work_reset, 0, Qt.AlignmentFlag.AlignLeft)
+
+        s0.addWidget(hairline())
+
         # ---- 3. language ----
         s0.addWidget(label("THE GAME'S LANGUAGE", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
         row = QHBoxLayout()
@@ -953,6 +1000,7 @@ class Window(QWidget):
         self.load_choices()
         self.show_page(0)   # (the setup page's own state: output closed, Cancel absent)
         self.refresh()
+        self.refresh_work()
         self.start_search()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_tick)
@@ -1200,6 +1248,30 @@ class Window(QWidget):
         self.save_choices()
         self.refresh()
 
+    def pick_work(self):
+        d = QFileDialog.getExistingDirectory(self, "Where the build files go (a “ReLink build files” folder is made inside)",
+                                             os.path.dirname(work_dir()))
+        if d:
+            self.choose_work(d)
+
+    def choose_work(self, picked):
+        """The player's folder, or None for the default. What the last build left at the old place goes: the next
+        build would not look for it there (launcher/Storage.cs: MoveWork)."""
+        old = work_dir()
+        new = set_work_dir(picked)
+        self.refresh_work()
+        if old != new and os.path.isdir(old):
+            threading.Thread(target=lambda: shutil.rmtree(old, ignore_errors=True), daemon=True).start()
+
+    def refresh_work(self):
+        d = work_dir()
+        size = dir_size(d) if os.path.isdir(d) else 0
+        self.work_note.setText(
+            "The build files go to %s%s. They are only needed by a build: the game does not read them.%s"
+            % (d, " (%s now)" % human(size) if size else "",
+               "" if d == WORK else " The default folder is %s." % WORK))
+        self.work_reset.setVisible(d != WORK)
+
     def pick_out(self):
         p = QFileDialog.getExistingDirectory(self, "Where the game is built (a ReLink folder is made inside)",
                                              os.path.expanduser("~"))
@@ -1378,22 +1450,24 @@ class Window(QWidget):
     def storage_use(self):
         """The game folder, and the build files: what they weigh, and whether they can go."""
         game = self.out or ""
+        work = work_dir()
         g = dir_size(game) if game and os.path.isdir(game) else 0
-        w = dir_size(WORK) if os.path.isdir(WORK) else 0
+        w = dir_size(work) if os.path.isdir(work) else 0
         if w >= (100 << 20):
             self.storage_note.setText(
                 "The game folder holds %s. The build files hold %s in %s; they only make the next install quicker "
-                "and can be freed: the game keeps playing." % (human(g), human(w), WORK))
+                "and can be freed: the game keeps playing." % (human(g), human(w), work))
         else:
             self.storage_note.setText("The game folder holds %s. No build files are left over." % human(g))
         self.free_link.setVisible(w >= (100 << 20))
 
     def free_space(self):
         """The build files go: the translated code and its compiled objects, nothing the game plays from."""
+        work = work_dir()
         self.free_link.setEnabled(False)
         self.free_link.setText("Freeing…")
-        shutil.rmtree(WORK, ignore_errors=True)
-        left = dir_size(WORK) if os.path.isdir(WORK) else 0
+        shutil.rmtree(work, ignore_errors=True)
+        left = dir_size(work) if os.path.isdir(work) else 0
         self.free_link.setText("Free up this space")
         self.free_link.setEnabled(True)
         self.storage_use()
@@ -1457,7 +1531,7 @@ class Window(QWidget):
             args += ["--romfs", self.romfs, "--exefs", self.exefs]
         self.log_path = os.path.join(self.out, "build.log")
         os.makedirs(self.out, exist_ok=True)
-        args += ["--log", self.log_path]
+        args += ["--log", self.log_path, "--work", work_dir()]
         self.write("$ " + " ".join(args) + "\n\n", "InkFaint")
 
         # (the launcher's build page: every step waiting, the log behind "Show details")
