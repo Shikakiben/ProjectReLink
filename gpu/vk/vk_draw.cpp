@@ -8,6 +8,7 @@
 // Pipelines persist in the driver's own disk cache. The full start (RX_VK_LEAN_PIPELINES=0) also keeps a VkPipelineCache
 // next to the executable (mkw_vk_pipelines.bin); the lean start, every PC's since 0.7.6, keeps none (pipelines_lean, below).
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <iterator>
 #include <atomic>
