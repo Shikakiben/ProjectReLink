@@ -137,8 +137,26 @@ def main():
         print("selftest: Show details on the problem page did nothing", file=sys.stderr)
         return 1
 
+    # the home page reads the game's own options and keeps every line it does not show
+    open(os.path.join(w.out, "relink"), "w").write("#!/bin/sh\n")
+    os.chmod(os.path.join(w.out, "relink"), 0o755)
+    with open(os.path.join(w.out, "relink_options.ini"), "w", encoding="utf-8") as f:
+        f.write("fullscreen=1\nresolution=2\nsome_future_key=42\n")
+    w.show_home()
+    app.processEvents()
+    if w.pages.currentIndex() != 4 or w.opt_resolution.currentData() != 2:
+        print("selftest: the home page did not read the game's options", file=sys.stderr)
+        return 1
+    w.opt_framegen.setCurrentIndex(w.opt_framegen.findData(3))
+    with open(os.path.join(w.out, "relink_options.ini"), encoding="utf-8") as f:
+        saved = f.read()
+    if "frame_generation=3" not in saved or "some_future_key=42" not in saved:
+        print("selftest: the home page did not keep the options it does not show", file=sys.stderr)
+        return 1
+
     print("selftest: the window starts, every step and the bar move, Install opens the installation page, "
-          "the ready page says Play, and the problem page explains and copies")
+          "the ready page says Play, the problem page explains and copies, and the home page reads and keeps "
+          "the game's options")
     return 0
 
 

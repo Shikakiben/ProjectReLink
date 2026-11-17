@@ -133,6 +133,56 @@ def set_work_dir(picked):
     return target
 
 
+# ---- the game's own settings: relink_options.ini beside relink, which its Insert menu writes too ----
+# The keys are the game's (gpu/vk/vk_menu.cpp: ini_key builds them from the row names) and the values are the game's
+# (gpu/vk/upscaler_rows.h says what a render share is). A key this page does not show is kept exactly as it was.
+def options_path(folder):
+    return os.path.join(folder, "relink_options.ini") if folder else ""
+
+
+def read_options(folder):
+    """[(key, value or None)]: a line with no '=' is kept as it is (a comment, a blank line)."""
+    rows = []
+    try:
+        with open(options_path(folder), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\r\n")
+                key, sep, value = line.partition("=")
+                rows.append((key.strip(), value.strip()) if sep else (line, None))
+    except OSError:
+        return []
+    return rows
+
+
+def write_options(folder, values):
+    """values: {key: int}. Every other line stays as it was, and options_version says which file this is (the game
+    moves older defaults when it is missing, vk_menu.cpp)."""
+    rows = read_options(folder)
+    lines, seen, versioned = [], set(), False
+    for key, value in rows:
+        if value is None:
+            lines.append(key)
+            continue
+        if key == "options_version":
+            value, versioned = "3", True
+        if key in values:
+            lines.append("%s=%d" % (key, values[key]))
+            seen.add(key)
+        else:
+            lines.append("%s=%s" % (key, value))
+    for key, value in values.items():
+        if key not in seen:
+            lines.append("%s=%d" % (key, value))
+    if not versioned:
+        lines.append("options_version=3")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(options_path(folder), "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
 def dir_size(path):
     """The bytes under a folder, the same way du counts them ('~/.cache/relink-builder' is already big)."""
     total = 0
@@ -229,6 +279,23 @@ def hairline():
     line.setFixedHeight(1)
     line.setStyleSheet("background: rgba(255,255,255,18); border: none;")
     return line
+
+
+def setting_row(name, widget, hint=""):
+    """One row of the Home page: its name on the left, its control on the right, and a line of explanation under it
+    (launcher/Home.cs's SwitchRow and ChoiceRow)."""
+    box = QWidget()
+    v = QVBoxLayout(box)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(2)
+    row = QHBoxLayout()
+    row.setSpacing(10)
+    row.addWidget(label(name, 13, QFont.Weight.Normal, "Ink"), 1)
+    row.addWidget(widget, 0)
+    v.addLayout(row)
+    if hint:
+        v.addWidget(label(hint, 12, QFont.Weight.Normal, "InkFaint", wrap=True))
+    return box
 
 
 class LinkChip(Chip):
@@ -630,6 +697,7 @@ class Window(QWidget):
         self.was_update = False
         self.cancelled = False
         self.last_error = ""
+        self._loading_home = False
         self.showing = 0
         self.dump_q = queue.Queue()      # (the search's finds, from its thread)
         self.check_q = queue.Queue()     # (each file's build id, from the check's thread)
@@ -919,6 +987,9 @@ class Window(QWidget):
                            13, QFont.Weight.Normal, "InkSoft", wrap=True))
         s2.addStretch(1)
         links2 = QHBoxLayout()
+        settings2 = Button("Settings…", "link")
+        settings2.clicked.connect(self.show_home)
+        links2.addWidget(settings2)
         again = Button("Install again…", "link")
         again.clicked.connect(lambda: self.show_page(0))
         links2.addWidget(again)
@@ -968,6 +1039,74 @@ class Window(QWidget):
         retry.clicked.connect(lambda: self.show_page(0))
         s3.addWidget(retry, 0, Qt.AlignmentFlag.AlignLeft)
         self.pages.addWidget(problem)
+
+        # ---- page 4: the game's settings, as the launcher's HomeView; everything else is the game's Insert menu ----
+        home = QWidget()
+        s4 = QVBoxLayout(home)
+        s4.setContentsMargins(0, 0, 0, 0)
+        s4.setSpacing(8)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        title4 = QLabel("Your game")
+        title4.setFont(display(27))
+        title4.setStyleSheet("color: %s; background: transparent;" % css(C["Ink"]))
+        head.addWidget(title4, 0, Qt.AlignmentFlag.AlignVCenter)
+        head.addStretch(1)
+        self.home_chip = Chip("", "Go", "GoSoft")
+        head.addWidget(self.home_chip, 0, Qt.AlignmentFlag.AlignVCenter)
+        s4.addLayout(head)
+        self.home_folder = label("", 12, QFont.Weight.Normal, "InkSoft", wrap=True)
+        s4.addWidget(self.home_folder)
+        s4.addWidget(hairline())
+        s4.addWidget(label("DISPLAY", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
+
+        self.opt_fullscreen = Tick("", True)
+        s4.addWidget(setting_row("Full screen", self.opt_fullscreen, "F11 switches it while you play, too."))
+        self.opt_resolution = Choice()
+        for text, value in (("Native", 1), ("Automatic", 0), ("75 %", 2), ("67 %", 3), ("58 %", 5), ("50 %", 4)):
+            self.opt_resolution.addItem(text, value)
+        self.opt_resolution.setFixedWidth(170)
+        s4.addWidget(setting_row("Render resolution", self.opt_resolution,
+                                 "Native is the sharpest; the shares lighten the graphics card's work."))
+        self.opt_upscaler = Choice()
+        for text, value in (("The game's own", 0), ("AMD FSR", 3), ("AMD FSR native AA", 4)):
+            self.opt_upscaler.addItem(text, value)
+        self.opt_upscaler.setFixedWidth(170)
+        s4.addWidget(setting_row("Upscaler", self.opt_upscaler, "What scales the 3D up to the screen."))
+        self.opt_framegen = Choice()
+        for text, value in (("None", 0), ("×2", 2), ("×3", 3), ("×4", 4)):
+            self.opt_framegen.addItem(text, value)
+        self.opt_framegen.setFixedWidth(170)
+        s4.addWidget(setting_row("Frame generation", self.opt_framegen,
+                                 "Frames made in between: smoother to the eye, not more responsive."))
+        self.opt_fps = Tick("", False)
+        s4.addWidget(setting_row("FPS counter", self.opt_fps, "In the top right corner."))
+        self.opt_ultrawide = Tick("", False)
+        s4.addWidget(setting_row("Ultrawide", self.opt_ultrawide,
+                                 "The camera takes the display's shape when it is wider than 16:9."))
+        self.opt_handheld = Tick("", False)
+        s4.addWidget(setting_row("Handheld profile", self.opt_handheld,
+                                 "The handheld mode's graphics settings: lighter, softer."))
+        s4.addWidget(hairline())
+        s4.addWidget(label("The rest is in the game's own menu: press Insert while you play.",
+                           12, QFont.Weight.Normal, "InkFaint", wrap=True))
+        s4.addStretch(1)
+        links4 = QHBoxLayout()
+        links4.setSpacing(22)
+        open4 = Button("Open folder", "link")
+        open4.clicked.connect(self.open_folder)
+        links4.addWidget(open4)
+        again4 = Button("Install again…", "link")
+        again4.clicked.connect(lambda: self.show_page(0))
+        links4.addWidget(again4)
+        links4.addStretch(1)
+        s4.addLayout(links4)
+        self.pages.addWidget(home)
+
+        for tick in (self.opt_fullscreen, self.opt_fps, self.opt_ultrawide, self.opt_handheld):
+            tick.clicked.connect(self.save_home_options)
+        for choice in (self.opt_resolution, self.opt_upscaler, self.opt_framegen):
+            choice.currentIndexChanged.connect(self.save_home_options)
 
         v.addWidget(self.pages, 0)
 
@@ -1039,7 +1178,7 @@ class Window(QWidget):
         self.details.setVisible(index in (0, 1))   # ("Show details" is offered on the setup and build pages)
         self.cancel_link.setVisible(building)      # (Cancel only means something while a build runs)
         self.log.setVisible(self.log_shown and index in (0, 1))
-        if ready:
+        if ready or index == 4:
             self.go.setText("Play")
         self.showing = index
 
@@ -1388,6 +1527,9 @@ class Window(QWidget):
         return bool(mine) and mine != "dev" and self.game_version() == mine
 
     def go_clicked(self):
+        if self.showing == 4:            # (the Home page's button is Play, whatever the version: the game is there)
+            self.play_game()
+            return
         if self.up_to_date():
             self.play_game()
         else:
@@ -1411,8 +1553,8 @@ class Window(QWidget):
         self.rows["lang"].setText(self.lang.currentText().split(" — ")[-1])
         if self.proc:
             return
-        if self.showing in (2, 3):
-            return          # (the ready and problem pages set their own line under the button)
+        if self.showing in (2, 3, 4):
+            return          # (the ready, problem and home pages set their own line under the button)
         missing = []
         if self.src == "nup" and not self.nup:
             missing.append("your .nup")
@@ -1475,6 +1617,58 @@ class Window(QWidget):
             self.storage_note.setText(self.storage_note.text()
                                       + " (%s could not be deleted: a file is in use. Close the game and try again.)"
                                       % human(left))
+
+    # ---- the game's settings (launcher/Home.cs: ShowHome, ShowSettings) ----
+    def show_home(self):
+        """Where the launcher's Home page is: the game's settings, its version and its folder. The game must be there."""
+        if not (self.out and os.access(os.path.join(self.out, "relink"), os.X_OK)):
+            self.show_page(0)
+            return
+        self.load_home_options()
+        self.home_folder.setText(self.out)
+        self.home_chip.setText("v%s" % (self.game_version() or "?").lstrip("v"))
+        self.show_page(4)
+        self.go.setText("Play")
+        self.go.setEnabled(True)
+        self.state.setText("Press Insert in the game for the rest of its settings.")
+
+    def load_home_options(self):
+        """The game's own file, read as it is: a key that is not there stays absent until the page changes it."""
+        rows = dict((k, v) for k, v in read_options(self.out) if v is not None)
+
+        def num(key, otherwise):
+            try:
+                return int(rows.get(key, otherwise))
+            except (TypeError, ValueError):
+                return otherwise
+
+        self._loading_home = True
+        try:
+            self.opt_fullscreen.setChecked(num("fullscreen", 1) != 0)
+            self.opt_fps.setChecked(num("fps_counter", 0) != 0)
+            self.opt_ultrawide.setChecked(num("ultrawide", 0) != 0)
+            self.opt_handheld.setChecked(num("handheld_profile", 0) != 0)
+            for choice, key, otherwise in ((self.opt_resolution, "resolution", 1),
+                                           (self.opt_upscaler, "dlss", 0),
+                                           (self.opt_framegen, "frame_generation", 0)):
+                index = choice.findData(num(key, otherwise))
+                choice.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            self._loading_home = False
+
+    def save_home_options(self, *_):
+        """Only the rows this page shows: every other line of relink_options.ini is kept as it was."""
+        if self._loading_home or not self.out:
+            return
+        write_options(self.out, {
+            "fullscreen": 1 if self.opt_fullscreen.isChecked() else 0,
+            "fps_counter": 1 if self.opt_fps.isChecked() else 0,
+            "ultrawide": 1 if self.opt_ultrawide.isChecked() else 0,
+            "handheld_profile": 1 if self.opt_handheld.isChecked() else 0,
+            "resolution": self.opt_resolution.currentData(),
+            "dlss": self.opt_upscaler.currentData(),
+            "frame_generation": self.opt_framegen.currentData(),
+        })
 
     # ---- when something goes wrong (launcher/Install.cs: ShowProblem) ----
     def show_problem(self, why):
