@@ -40,7 +40,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPen, QTextCharFormat,
                            QTextCursor)
 from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
-                               QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
+                               QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
 # (-I, which AppRun passes, is isolated mode: it keeps the script's own directory out of sys.path, so the three modules
 #  beside this file have to be put there. Without this the AppImage dies on "No module named 'scene'".)
@@ -50,7 +50,7 @@ import finder
 import scene
 import theme as T
 import updates
-from theme import C, Button, Chip, Choice, PathEdit, Tick, css, font
+from theme import C, Button, Chip, Choice, PathEdit, Slider, Tick, css, font
 
 HERE = os.path.normpath(_appdir)
 CHOICES = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "relink", "install.json")
@@ -181,6 +181,74 @@ def write_options(folder, values):
             f.write("\n".join(lines) + "\n")
     except OSError:
         pass
+
+
+def read_language(folder):
+    """The code on the first line that is not a comment (language.txt, whose comments list the codes)."""
+    try:
+        with open(os.path.join(folder, "language.txt"), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.strip()
+                if s and not s.startswith("#"):
+                    return s
+    except OSError:
+        pass
+    return ""
+
+
+def write_language(folder, code):
+    """The code line replaced, every comment kept (launcher/Settings.cs: Save writes language.txt the same way)."""
+    path = os.path.join(folder, "language.txt")
+    lines, done = [], False
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                s = raw.rstrip("\r\n")
+                if not done and s.strip() and not s.strip().startswith("#"):
+                    lines.append(code)
+                    done = True
+                else:
+                    lines.append(s)
+    except OSError:
+        lines = ["# The game's language (written by the launcher)."]
+    if not done:
+        lines.append(code)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+# ---- the launcher's own choices (launcher/Settings.cs: launcher.ini): the ones the game has no row for ----
+LAUNCHER_CHOICES = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                                "relink", "launcher.json")
+
+
+def read_launcher():
+    try:
+        with open(LAUNCHER_CHOICES, encoding="utf-8") as f:
+            saved = json.load(f)
+        return saved if isinstance(saved, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_launcher(values):
+    try:
+        os.makedirs(os.path.dirname(LAUNCHER_CHOICES), exist_ok=True)
+        with open(LAUNCHER_CHOICES, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(values, f, indent=2)
+            f.write("\n")
+    except OSError:
+        pass
+
+
+# The prepared shaders (launcher/Settings.cs: PreparedShaderFiles): what the game makes once for the graphics card, and
+# what "Prepare again" removes so the next start makes them again (10 to 15 minutes).
+PREPARED_SHADERS = ("relink_programs.bin", "relink_programs.idx", "relink_pipelines.bin", "relink_prepared.bin",
+                    "relink_prepared.bin.warming", "relink_prepare_skipped")
 
 
 def dir_size(path):
@@ -708,6 +776,14 @@ class Window(QWidget):
         self.files_compiled = 0
         self.hour = scene.hour_now()
 
+        # (--launch <folder>: what the desktop shortcut passes, so it opens the window on that game's settings, as the
+        #  folder's ReLink.exe does on Windows — launcher/setup/setup.c's launch_installed)
+        self.launched_for = ""
+        argv = sys.argv[1:]
+        for i, word in enumerate(argv):
+            if word == "--launch" and i + 1 < len(argv):
+                self.launched_for = os.path.abspath(argv[i + 1])
+
         self.setWindowTitle("ReLink — Ocarina of Time (Switch 2)")
         self.setMinimumSize(980, 660)   # (30 + 424 + 50 + 419 + 30: nothing can overflow)
         self.resize(1120, 700)   # (the launcher's own size: the backdrop is drawn for it, at 1:1)
@@ -1063,39 +1139,129 @@ class Window(QWidget):
         self.home_folder = label("", 12, QFont.Weight.Normal, "InkSoft", wrap=True)
         s4.addWidget(self.home_folder)
         s4.addWidget(hairline())
-        s4.addWidget(label("DISPLAY", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
 
+        # (the rows are taller than the panel: the page scrolls, as the launcher's Home page does)
+        scroller = QScrollArea()
+        scroller.setWidgetResizable(True)
+        scroller.setFrameShape(QFrame.Shape.NoFrame)
+        scroller.setStyleSheet(
+            "QScrollArea, QScrollArea > QWidget > QWidget, #homeBody { background: transparent; border: none; }"
+            "QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }"
+            "QScrollBar::handle:vertical { background: rgba(255,255,255,40); border-radius: 3px; min-height: 24px; }"
+            "QScrollBar::handle:vertical:hover { background: rgba(255,255,255,70); }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }")
+        body = QWidget()
+        # (a scrolled widget paints Qt's base colour, white here, unless both it and the viewport are told not to)
+        body.setObjectName("homeBody")
+        body.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        body.setAutoFillBackground(False)
+        scroller.viewport().setAutoFillBackground(False)
+        s5 = QVBoxLayout(body)
+        s5.setContentsMargins(0, 0, 8, 0)
+        s5.setSpacing(8)
+
+        s5.addWidget(label("DISPLAY", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
         self.opt_fullscreen = Tick("", True)
-        s4.addWidget(setting_row("Full screen", self.opt_fullscreen, "F11 switches it while you play, too."))
+        s5.addWidget(setting_row("Full screen", self.opt_fullscreen, "F11 switches it while you play, too."))
         self.opt_resolution = Choice()
         for text, value in (("Native", 1), ("Automatic", 0), ("75 %", 2), ("67 %", 3), ("58 %", 5), ("50 %", 4)):
             self.opt_resolution.addItem(text, value)
         self.opt_resolution.setFixedWidth(170)
-        s4.addWidget(setting_row("Render resolution", self.opt_resolution,
+        s5.addWidget(setting_row("Render resolution", self.opt_resolution,
                                  "Native is the sharpest; the shares lighten the graphics card's work."))
         self.opt_upscaler = Choice()
         for text, value in (("The game's own", 0), ("AMD FSR", 3), ("AMD FSR native AA", 4)):
             self.opt_upscaler.addItem(text, value)
         self.opt_upscaler.setFixedWidth(170)
-        s4.addWidget(setting_row("Upscaler", self.opt_upscaler, "What scales the 3D up to the screen."))
+        s5.addWidget(setting_row("Upscaler", self.opt_upscaler, "What scales the 3D up to the screen."))
+        self.opt_filter = Choice()
+        for text, value in (("Simple", 0), ("Catmull-Rom", 1), ("Lanczos", 2)):
+            self.opt_filter.addItem(text, value)
+        self.opt_filter.setFixedWidth(170)
+        s5.addWidget(setting_row("Window scaling filter", self.opt_filter,
+                                 "When the picture is smaller than the window."))
+        self.opt_sharpness = Slider(0, 100, 50, 10)
+        self.opt_sharpness_text = label("50 %", 13, QFont.Weight.Normal, "InkSoft")
+        self.opt_sharpness_text.setFixedWidth(44)
+        self.opt_sharpness_text.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        sharp_box = QWidget()
+        sb = QHBoxLayout(sharp_box)
+        sb.setContentsMargins(0, 0, 0, 0)
+        sb.setSpacing(10)
+        sb.addWidget(self.opt_sharpness, 1)
+        sb.addWidget(self.opt_sharpness_text, 0)
+        sharp_box.setFixedWidth(190)
+        s5.addWidget(setting_row("Sharpness", sharp_box, "With FSR or DLSS, about 80 %."))
+        self.opt_fps = Tick("", False)
+        s5.addWidget(setting_row("FPS counter", self.opt_fps, "In the top right corner."))
+        self.opt_ultrawide = Tick("", False)
+        s5.addWidget(setting_row("Ultrawide", self.opt_ultrawide,
+                                 "The camera takes the display's shape when it is wider than 16:9."))
+
+        s5.addWidget(hairline())
+        s5.addWidget(label("SMOOTHNESS", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
+        self.opt_framerate = Choice()
+        for text, value in (("60, as on the console", 0), ("Unlocked", 1), ("30, smooth", 2)):
+            self.opt_framerate.addItem(text, value)
+        self.opt_framerate.setFixedWidth(170)
+        s5.addWidget(setting_row("Frames per second", self.opt_framerate,
+                                 "Unlocked follows the display; 30 keeps every frame on screen the same time."))
+        self.opt_speed = Choice()
+        for text, value in (("By frame", 0), ("Real time", 1)):
+            self.opt_speed.addItem(text, value)
+        self.opt_speed.setFixedWidth(170)
+        s5.addWidget(setting_row("Game speed", self.opt_speed,
+                                 "Real time: when a frame is late, the game does not slow down."))
         self.opt_framegen = Choice()
         for text, value in (("None", 0), ("×2", 2), ("×3", 3), ("×4", 4)):
             self.opt_framegen.addItem(text, value)
         self.opt_framegen.setFixedWidth(170)
-        s4.addWidget(setting_row("Frame generation", self.opt_framegen,
+        s5.addWidget(setting_row("Frame generation", self.opt_framegen,
                                  "Frames made in between: smoother to the eye, not more responsive."))
-        self.opt_fps = Tick("", False)
-        s4.addWidget(setting_row("FPS counter", self.opt_fps, "In the top right corner."))
-        self.opt_ultrawide = Tick("", False)
-        s4.addWidget(setting_row("Ultrawide", self.opt_ultrawide,
-                                 "The camera takes the display's shape when it is wider than 16:9."))
+        self.opt_pacing = Tick("", False)
+        s5.addWidget(setting_row("Even pacing of generated frames", self.opt_pacing, "With frame generation only."))
+
+        s5.addWidget(hairline())
+        s5.addWidget(label("GAME", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
+        self.opt_language = Choice()
+        for code, name in LANGUAGES:
+            self.opt_language.addItem(name, code)
+        self.opt_language.setFixedWidth(170)
+        s5.addWidget(setting_row("Game language", self.opt_language, "Shows the next time the game starts."))
+        self.opt_audio = Tick("", True)
+        s5.addWidget(setting_row("Sound", self.opt_audio))
         self.opt_handheld = Tick("", False)
-        s4.addWidget(setting_row("Handheld profile", self.opt_handheld,
+        s5.addWidget(setting_row("Handheld profile", self.opt_handheld,
                                  "The handheld mode's graphics settings: lighter, softer."))
-        s4.addWidget(hairline())
-        s4.addWidget(label("The rest is in the game's own menu: press Insert while you play.",
+        shaders_row = QWidget()
+        shr = QVBoxLayout(shaders_row)
+        shr.setContentsMargins(0, 0, 0, 0)
+        shr.setSpacing(2)
+        shline = QHBoxLayout()
+        shline.setSpacing(10)
+        shline.addWidget(label("Shaders", 13, QFont.Weight.Normal, "Ink"), 1)
+        self.shaders_link = Button("Prepare again…", "link")
+        self.shaders_link.clicked.connect(self.prepare_shaders_again)
+        shline.addWidget(self.shaders_link, 0)
+        shr.addLayout(shline)
+        self.shaders_note = label("", 12, QFont.Weight.Normal, "InkFaint", wrap=True)
+        shr.addWidget(self.shaders_note)
+        s5.addWidget(shaders_row)
+
+        s5.addWidget(hairline())
+        s5.addWidget(label("CONTROLS", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
+        self.opt_invert = Tick("", False)
+        s5.addWidget(setting_row("Mouse: invert the vertical axis", self.opt_invert,
+                                 "The mouse turns the camera after a click in the game's window; Escape lets it go."))
+
+        s5.addWidget(hairline())
+        s5.addWidget(label("The rest is in the game's own menu: press Insert while you play.",
                            12, QFont.Weight.Normal, "InkFaint", wrap=True))
-        s4.addStretch(1)
+        s5.addStretch(1)
+        scroller.setWidget(body)
+        s4.addWidget(scroller, 1)
+
         links4 = QHBoxLayout()
         links4.setSpacing(22)
         open4 = Button("Open folder", "link")
@@ -1108,10 +1274,15 @@ class Window(QWidget):
         s4.addLayout(links4)
         self.pages.addWidget(home)
 
-        for tick in (self.opt_fullscreen, self.opt_fps, self.opt_ultrawide, self.opt_handheld):
+        for tick in (self.opt_fullscreen, self.opt_fps, self.opt_ultrawide, self.opt_pacing,
+                     self.opt_handheld, self.opt_audio, self.opt_invert):
             tick.clicked.connect(self.save_home_options)
-        for choice in (self.opt_resolution, self.opt_upscaler, self.opt_framegen):
-            choice.currentIndexChanged.connect(self.save_home_options)
+        for choice in (self.opt_resolution, self.opt_upscaler, self.opt_filter, self.opt_framerate,
+                       self.opt_speed, self.opt_framegen, self.opt_language):
+            # (activated, not currentIndexChanged: the latter fires on the setCurrentIndex that reading the file does, and
+            #  a window that merely showed its settings rewrote the game's file with the keys this page knows)
+            choice.activated[int].connect(self.save_home_options)
+        self.opt_sharpness.moved.connect(self.save_home_options)
 
         v.addWidget(self.pages, 0)
 
@@ -1142,6 +1313,11 @@ class Window(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # (nothing is focused on open: no ring on a button nobody asked for)
         self.setFocus()
         self.load_choices()
+        if self.launched_for:          # (the shortcut's folder wins: it is the one the player asked for)
+            self.out = self.launched_for
+            self.edit_out.setText(self.out)
+            self.edit_out.setCursorPosition(0)
+            self.save_choices()
         self.show_page(0)   # (the setup page's own state: output closed, Cancel absent)
         self.refresh()
         self.refresh_work()
@@ -1450,6 +1626,15 @@ class Window(QWidget):
         env = {k: v for k, v in os.environ.items()
                if not (k.startswith(("RELINK_", "PYTHON", "APPDIR", "APPIMAGE", "ARGV0", "OWD")) or k == "LD_LIBRARY_PATH")}
         env["RELINK_NO_UPDATE_CHECK"] = "1"
+        # (the two the game has no row for, host/nn_vi.c and host/nn_audio.c: the launcher passes them, and so do we)
+        saved = read_launcher()
+        if saved.get("audio", 1) == 0:
+            env["HOS_AUDIO"] = "0"
+        rate = saved.get("frame_rate", 0)
+        if rate == 1:
+            env["HOS_FPS_UNLOCKED"] = "1"
+        elif rate == 2:
+            env["HOS_FPS_CAP"] = "30"
         try:
             subprocess.Popen([game], cwd=self.out, env=env)
         except OSError as error:
@@ -1500,7 +1685,7 @@ class Window(QWidget):
                     continue
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(text % (exec_field(game), self.out, icon or "applications-games"))
+                    f.write(text % (self.launcher_command(), self.out, icon or "applications-games"))
                 os.chmod(path, 0o755)   # (some file managers will not launch a .desktop without the bit)
                 if os.path.dirname(path) == desktop_dir():
                     # (GNOME asks "Untrusted application launcher" on every click without this; a no-op elsewhere)
@@ -1508,6 +1693,16 @@ class Window(QWidget):
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except OSError as error:
                 print("shortcut %s: %s" % (path, error))
+
+    def launcher_command(self):
+        """What the shortcut runs (launcher/Finder.cs: the folder's ReLink.exe, or the launcher itself with --launch).
+
+        An AppImage that built this game is told which folder, so the shortcut opens the window on its settings, as
+        the launcher does on Windows; from a source tree, or with no AppImage around, it opens the game itself."""
+        appimage = os.environ.get("APPIMAGE") or ""
+        if appimage and os.path.isfile(appimage) and self.out:
+            return exec_field(appimage) + " --launch " + exec_field(self.out)
+        return exec_field(os.path.join(self.out or "", "relink"))
 
     def refresh_shortcut_state(self):
         """The ticks are usable once there is a game to point at, as the launcher's ready rows appear after a build."""
@@ -1660,33 +1855,93 @@ class Window(QWidget):
             except (TypeError, ValueError):
                 return otherwise
 
+        saved = read_launcher()
         self._loading_home = True
         try:
             self.opt_fullscreen.setChecked(num("fullscreen", 1) != 0)
             self.opt_fps.setChecked(num("fps_counter", 0) != 0)
             self.opt_ultrawide.setChecked(num("ultrawide", 0) != 0)
             self.opt_handheld.setChecked(num("handheld_profile", 0) != 0)
+            self.opt_pacing.setChecked(num("frame_pacing", 0) != 0)
+            self.opt_invert.setChecked(num("invert_mouse_vertical", 0) != 0)
+            self.opt_audio.setChecked(saved.get("audio", 1) != 0)
+            self.opt_sharpness.set_value(num("sharpness", 50))
+            self.opt_sharpness_text.setText("%d %%" % self.opt_sharpness.value)
             for choice, key, otherwise in ((self.opt_resolution, "resolution", 1),
                                            (self.opt_upscaler, "dlss", 0),
+                                           (self.opt_filter, "upscaling", 0),
+                                           (self.opt_speed, "game_speed", 1),
                                            (self.opt_framegen, "frame_generation", 0)):
                 index = choice.findData(num(key, otherwise))
                 choice.setCurrentIndex(index if index >= 0 else 0)
+            index = self.opt_framerate.findData(int(saved.get("frame_rate", 0)))
+            self.opt_framerate.setCurrentIndex(index if index >= 0 else 0)
+            index = self.opt_language.findData(read_language(self.out))
+            self.opt_language.setCurrentIndex(index if index >= 0 else 0)
         finally:
             self._loading_home = False
+        self.shaders_size()
+
+    def shaders_size(self):
+        """What the prepared shaders weigh, as the launcher's Settings.PreparedShaders says it."""
+        size = 0
+        for name in PREPARED_SHADERS:
+            try:
+                size += os.path.getsize(os.path.join(self.out, name))
+            except OSError:
+                pass
+        self.shaders_note.setText("Prepared for your graphics card: %s." % human(size) if size
+                                  else "Not prepared yet: the first start makes them, with a loading screen.")
+        self.shaders_link.setEnabled(bool(self.out) and os.path.isdir(self.out))
+
+    def prepare_shaders_again(self):
+        """The prepared shaders go, as the launcher's DeletePreparedShaders: the next start makes them again."""
+        if not self.out:
+            return
+        size = 0
+        for name in PREPARED_SHADERS:
+            try:
+                size += os.path.getsize(os.path.join(self.out, name))
+            except OSError:
+                pass
+        if QMessageBox.question(self, "ReLink",
+                                "Delete the prepared shaders (%s)?\n\nThe next start then takes 10 to 15 minutes "
+                                "longer, with a loading screen. Your saves are not touched."
+                                % human(size)) != QMessageBox.StandardButton.Yes:
+            return
+        for name in PREPARED_SHADERS:
+            try:
+                os.remove(os.path.join(self.out, name))
+            except OSError:
+                pass
+        self.shaders_size()
 
     def save_home_options(self, *_):
         """Only the rows this page shows: every other line of relink_options.ini is kept as it was."""
         if self._loading_home or not self.out:
             return
+        self.opt_sharpness_text.setText("%d %%" % self.opt_sharpness.value)
         write_options(self.out, {
             "fullscreen": 1 if self.opt_fullscreen.isChecked() else 0,
             "fps_counter": 1 if self.opt_fps.isChecked() else 0,
             "ultrawide": 1 if self.opt_ultrawide.isChecked() else 0,
             "handheld_profile": 1 if self.opt_handheld.isChecked() else 0,
+            "frame_pacing": 1 if self.opt_pacing.isChecked() else 0,
+            "invert_mouse_vertical": 1 if self.opt_invert.isChecked() else 0,
+            "sharpness": self.opt_sharpness.value,
             "resolution": self.opt_resolution.currentData(),
             "dlss": self.opt_upscaler.currentData(),
+            "upscaling": self.opt_filter.currentData(),
+            "game_speed": self.opt_speed.currentData(),
             "frame_generation": self.opt_framegen.currentData(),
         })
+        code = self.opt_language.currentData()
+        if code and code != read_language(self.out):
+            write_language(self.out, code)
+        saved = read_launcher()   # (the two the game has no row for: kept beside it, passed to the game at its start)
+        saved["frame_rate"] = self.opt_framerate.currentData()
+        saved["audio"] = 1 if self.opt_audio.isChecked() else 0
+        write_launcher(saved)
 
     # ---- when something goes wrong (launcher/Install.cs: ShowProblem) ----
     def show_problem(self, why):

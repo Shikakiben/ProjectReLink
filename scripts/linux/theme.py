@@ -460,3 +460,49 @@ def tick_path(cx, cy):
     path.lineTo(cx - 1.5, cy + 3.5)
     path.lineTo(cx + 5, cy - 4)
     return path
+
+
+class Slider(QWidget):
+    """Slider Line: a hairline, the part before the handle in Brand, a round handle; the value's text is the caller's
+    (launcher/Home.cs: Sharpness). Steps as the game's row does, so the number written is one it would have kept."""
+
+    moved = Signal(int)
+
+    def __init__(self, lo=0, hi=100, value=50, step=5):
+        super().__init__()
+        self.lo, self.hi, self.step = lo, hi, max(1, step)
+        self.value = value
+        self.setFixedHeight(22)
+        self.setMinimumWidth(170)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def set_value(self, v):
+        self.value = max(self.lo, min(self.hi, int(round(v / self.step) * self.step)))
+        self.update()
+
+    def _value_at(self, x):
+        span = max(1, self.width() - 16)
+        return self.lo + (self.hi - self.lo) * max(0.0, min(1.0, (x - 8) / span))
+
+    def mousePressEvent(self, e):
+        self.set_value(self._value_at(e.position().x()))
+        self.moved.emit(self.value)
+
+    def mouseMoveEvent(self, e):
+        if e.buttons():
+            self.set_value(self._value_at(e.position().x()))
+            self.moved.emit(self.value)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        y = self.height() / 2
+        p.setPen(QPen(argb("#1FFFFFFF"), 2))
+        p.drawLine(QPointF(8, y), QPointF(self.width() - 8, y))
+        x = 8 + (self.width() - 16) * (self.value - self.lo) / max(1, self.hi - self.lo)
+        p.setPen(QPen(C["Brand"], 2))
+        p.drawLine(QPointF(8, y), QPointF(x, y))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(C["Ink"])
+        p.drawEllipse(QPointF(x, y), 6.5, 6.5)

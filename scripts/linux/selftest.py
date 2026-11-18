@@ -151,6 +151,7 @@ def main():
         print("selftest: the home page did not read the game's options", file=sys.stderr)
         return 1
     w.opt_framegen.setCurrentIndex(w.opt_framegen.findData(3))
+    w.save_home_options()   # (a pick: the window writes on the user's choice, not on the setCurrentIndex a test does)
     with open(os.path.join(w.out, "relink_options.ini"), encoding="utf-8") as f:
         saved = f.read()
     if "frame_generation=3" not in saved or "some_future_key=42" not in saved:
