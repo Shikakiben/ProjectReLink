@@ -1694,14 +1694,40 @@ class Window(QWidget):
             except OSError as error:
                 print("shortcut %s: %s" % (path, error))
 
+    def folder_appimage(self):
+        """The AppImage this window runs from, copied into the game folder, and its path.
+
+        The folder then holds its own launcher, as the folder's ReLink.exe does on Windows (make_game.py copies the
+        setup there), so moving or deleting the download breaks nothing. The copy is replaced when the running image
+        is not the one already there (its size or its date), which is what a new release is."""
+        appimage = os.environ.get("APPIMAGE") or ""
+        if not appimage or not os.path.isfile(appimage) or not self.out or not os.path.isdir(self.out):
+            return ""
+        target = os.path.join(self.out, "ReLink.AppImage")
+        try:
+            try:
+                if (os.path.getsize(target) == os.path.getsize(appimage)
+                        and os.path.getmtime(target) >= os.path.getmtime(appimage)):
+                    return target
+            except OSError:
+                pass
+            part = target + ".new"
+            shutil.copy2(appimage, part)      # (copied aside and renamed: a copy stopped half way is never the launcher)
+            os.chmod(part, 0o755)
+            os.replace(part, target)
+        except OSError as error:
+            print("launcher copy: %s" % error)
+            return target if os.path.exists(target) else ""
+        return target
+
     def launcher_command(self):
         """What the shortcut runs (launcher/Finder.cs: the folder's ReLink.exe, or the launcher itself with --launch).
 
-        An AppImage that built this game is told which folder, so the shortcut opens the window on its settings, as
-        the launcher does on Windows; from a source tree, or with no AppImage around, it opens the game itself."""
-        appimage = os.environ.get("APPIMAGE") or ""
-        if appimage and os.path.isfile(appimage) and self.out:
-            return exec_field(appimage) + " --launch " + exec_field(self.out)
+        The folder's own copy first, told which folder, so the shortcut opens the window on its settings as the
+        launcher does on Windows; the game itself when no AppImage is around (a source tree)."""
+        copy = self.folder_appimage()
+        if copy:
+            return exec_field(copy) + " --launch " + exec_field(self.out)
         return exec_field(os.path.join(self.out or "", "relink"))
 
     def refresh_shortcut_state(self):
@@ -2164,6 +2190,7 @@ class Window(QWidget):
             self.write("\n== done: %s ==\n" % game, "Go")
             self.log_shown = False
             self.details.setText("Show details")
+            self.folder_appimage()  # (the folder keeps its own launcher, as Windows' ReLink.exe does)
             self.sync_shortcuts()   # (the ticks' files, as launcher/Finder.cs's RefreshShortcuts after an update)
             self.show_ready()
         else:
