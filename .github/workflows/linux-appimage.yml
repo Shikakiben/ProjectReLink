@@ -129,6 +129,28 @@ jobs:
           export QT_QPA_PLATFORM=offscreen
           build-linux/AppDir/usr/python/bin/python3 scripts/linux/selftest.py
 
+      # The desktop shortcut runs the AppImage with --launch <folder>. AppRun sent every argument to make_game.py, so
+      # the shortcut died on "unrecognized arguments: --launch" and the window never came up. This runs AppRun the way
+      # the shortcut does and checks that the window is what starts.
+      - name: The shortcut's --launch reaches the window
+        run: |
+          export QT_QPA_PLATFORM=offscreen
+          build-linux/AppDir/AppRun --launch "$PWD/build-linux/AppDir" > launch.log 2>&1 &
+          pid=$!
+          sleep 12
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "::error::AppRun --launch did not start the window:"
+            cat launch.log
+            exit 1
+          fi
+          kill "$pid" 2>/dev/null || true
+          if grep -q "unrecognized arguments" launch.log; then
+            echo "::error::--launch went to make_game.py, not to the window:"
+            cat launch.log
+            exit 1
+          fi
+          echo "AppRun --launch started the window"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ReLink-linux-x86_64
