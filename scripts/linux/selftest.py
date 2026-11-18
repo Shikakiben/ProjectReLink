@@ -12,6 +12,7 @@ as a failure instead of a silent button.
 """
 import os
 import sys
+import tempfile
 import threading
 
 here = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +20,8 @@ sys.path.insert(0, here)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["RELINK_NO_SEARCH"] = "1"   # (the search is not what this tests, and it would walk the runner's disk)
+# (its own choices and work.txt: the test must not read, or write, the ones of whoever runs it)
+os.environ.setdefault("XDG_CONFIG_HOME", os.path.join(tempfile.gettempdir(), "relink-selftest-config"))
 
 from PySide6.QtWidgets import QApplication
 
@@ -154,9 +157,26 @@ def main():
         print("selftest: the home page did not keep the options it does not show", file=sys.stderr)
         return 1
 
+    # a window started with a built game opens on the home page, not on Install (and the way back is always there)
+    import json
+    os.makedirs(os.path.dirname(gui.CHOICES), exist_ok=True)
+    with open(gui.CHOICES, "w", encoding="utf-8") as f:
+        json.dump({"nup": "/dev/null", "romfs": "", "exefs": "", "out": w.out, "language": "fr"}, f)
+    second = gui.Window()
+    app.processEvents()
+    if second.pages.currentIndex() != 4:
+        print("selftest: a window with a built game did not open on the home page", file=sys.stderr)
+        return 1
+    second.show_page(0)
+    app.processEvents()
+    if second.your_game.isHidden():
+        print("selftest: the setup page has no way back to the home page", file=sys.stderr)
+        return 1
+    second.close()
+
     print("selftest: the window starts, every step and the bar move, Install opens the installation page, "
-          "the ready page says Play, the problem page explains and copies, and the home page reads and keeps "
-          "the game's options")
+          "the ready page says Play, the problem page explains and copies, the home page reads and keeps "
+          "the game's options, and a built game opens on it")
     return 0
 
 

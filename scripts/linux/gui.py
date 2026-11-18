@@ -793,6 +793,11 @@ class Window(QWidget):
         left.addLayout(foot)
         left.addSpacing(6)
 
+        self.your_game = Button("Your game", "link")
+        self.your_game.clicked.connect(self.show_home)
+        self.your_game.setVisible(False)
+        left.addWidget(self.your_game, 0, Qt.AlignmentFlag.AlignLeft)
+
         self.folder = Button("Game folder", "link")
         self.folder.clicked.connect(self.open_folder)
         self.folder.setEnabled(False)
@@ -1140,6 +1145,9 @@ class Window(QWidget):
         self.show_page(0)   # (the setup page's own state: output closed, Cancel absent)
         self.refresh()
         self.refresh_work()
+        # (the launcher's own start: Home when the game is already there, Install otherwise — launcher/MainWindow.xaml.cs)
+        if self.out and os.access(os.path.join(self.out, "relink"), os.X_OK):
+            self.show_home()
         self.start_search()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_tick)
@@ -1178,7 +1186,7 @@ class Window(QWidget):
         self.details.setVisible(index in (0, 1))   # ("Show details" is offered on the setup and build pages)
         self.cancel_link.setVisible(building)      # (Cancel only means something while a build runs)
         self.log.setVisible(self.log_shown and index in (0, 1))
-        if ready or index == 4:
+        if ready:
             self.go.setText("Play")
         self.showing = index
 
@@ -1527,8 +1535,11 @@ class Window(QWidget):
         return bool(mine) and mine != "dev" and self.game_version() == mine
 
     def go_clicked(self):
-        if self.showing == 4:            # (the Home page's button is Play, whatever the version: the game is there)
-            self.play_game()
+        if self.showing == 4:            # (the Home page's button: Play, or Update when this AppImage is newer)
+            if self.up_to_date():
+                self.play_game()
+            else:
+                self.start()
             return
         if self.up_to_date():
             self.play_game()
@@ -1542,9 +1553,11 @@ class Window(QWidget):
         return have and bool(self.out)
 
     def refresh(self):
-        self.go.setText("Play" if self.up_to_date() else "Install")
+        if self.showing != 4:            # (the Home page says Play or Update itself: show_home sets it)
+            self.go.setText("Play" if self.up_to_date() else "Install")
         self.go.setEnabled(self.ready() and not self.proc)
         self.folder.setEnabled(bool(self.out) and os.path.isdir(self.out))
+        self.your_game.setVisible(bool(self.out) and os.access(os.path.join(self.out or "", "relink"), os.X_OK))
         self.refresh_shortcut_state()
         self.rows["copy"].setText(os.path.basename(self.nup) if self.src == "nup" and self.nup
                                   else (os.path.basename(self.romfs) + " + " + os.path.basename(self.exefs)
@@ -1628,9 +1641,14 @@ class Window(QWidget):
         self.home_folder.setText(self.out)
         self.home_chip.setText("v%s" % (self.game_version() or "?").lstrip("v"))
         self.show_page(4)
-        self.go.setText("Play")
+        if self.up_to_date():
+            self.go.setText("Play")
+            self.state.setText("Press Insert in the game for the rest of its settings.")
+        else:
+            self.go.setText("Update")
+            self.state.setText("Built with %s; this is %s. Update rebuilds it."
+                               % (self.game_version() or "?", updates.version(HERE)))
         self.go.setEnabled(True)
-        self.state.setText("Press Insert in the game for the rest of its settings.")
 
     def load_home_options(self):
         """The game's own file, read as it is: a key that is not there stays absent until the page changes it."""
