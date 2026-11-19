@@ -10,12 +10,13 @@
 #define STBTT_STATIC
 #include "stb_truetype.h"
 
-enum { G_DC = 0x47444301, G_BITMAP, G_FONT, G_BRUSH };
+enum { G_DC = 0x47444301, G_BITMAP, G_FONT, G_BRUSH, G_RGN };
 typedef struct { int type; } GObj;
 typedef struct { GObj o; int w, h; uint32_t *bits; } GBitmap;
 typedef struct { GObj o; int px, bold, aa; } GFont;
 typedef struct { GObj o; COLORREF c; } GBrush;
-typedef struct { GObj o; GBitmap *bmp; GFont *font; COLORREF text; UINT align; int bk; } GDc;
+typedef struct { GObj o; int x0, y0, x1, y1; } GRgn;
+typedef struct { GObj o; GBitmap *bmp; GFont *font; COLORREF text; UINT align; int bk; GRgn *clip; } GDc;
 
 /* ---- the fonts: regular and bold, loaded once ---- */
 typedef struct { unsigned char *data; stbtt_fontinfo info; int ok; } Face;
@@ -121,6 +122,25 @@ BOOL DeleteObject(HGDIOBJ obj) {
     return TRUE;
 }
 BOOL GdiFlush(void) { return TRUE; }
+
+/* (relink) The clip the Insert menu's lists need: Windows' GDI regions are rectangles here, which is all the menu
+   makes (CreateRectRgn, SelectClipRgn(dc, NULL) to take it off). */
+HRGN CreateRectRgn(int x1, int y1, int x2, int y2) {
+    GRgn *r = (GRgn *)calloc(1, sizeof *r);
+    r->o.type = G_RGN;
+    r->x0 = x1 < x2 ? x1 : x2, r->x1 = x1 < x2 ? x2 : x1;
+    r->y0 = y1 < y2 ? y1 : y2, r->y1 = y1 < y2 ? y2 : y1;
+    return r;
+}
+int SelectClipRgn(HDC hdc, HRGN rgn) {
+    GDc *d = (GDc *)hdc;
+    if (!d) return 0;
+    d->clip = (GRgn *)rgn;
+    return 1;
+}
+static int clipped(const GDc *d, int x, int y) {
+    return !d->clip || (x >= d->clip->x0 && x < d->clip->x1 && y >= d->clip->y0 && y < d->clip->y1);
+}
 HFONT CreateFontA(int height, int width, int escapement, int orientation, int weight, DWORD italic, DWORD underline,
                   DWORD strikeout, DWORD charset, DWORD out_precision, DWORD clip_precision, DWORD quality, DWORD pitch,
                   LPCSTR face) {
@@ -143,8 +163,15 @@ int FillRect(HDC hdc, const RECT *r, HBRUSH hb) {
     GDc *d = (GDc *)hdc;
     if (!d || !d->bmp || !hb) return 0;
     const uint32_t px = bgrx(((GBrush *)hb)->c);
-    const int x0 = r->left < 0 ? 0 : r->left, y0 = r->top < 0 ? 0 : r->top;
-    const int x1 = r->right > d->bmp->w ? d->bmp->w : r->right, y1 = r->bottom > d->bmp->h ? d->bmp->h : r->bottom;
+    int x0 = r->left < 0 ? 0 : r->left, y0 = r->top < 0 ? 0 : r->top;
+    int x1 = r->right > d->bmp->w ? d->bmp->w : r->right, y1 = r->bottom > d->bmp->h ? d->bmp->h : r->bottom;
+    if (d->clip) {   /* (the menu's list body: what scrolls under the headings is not drawn over them) */
+        if (x0 < d->clip->x0) x0 = d->clip->x0;
+        if (y0 < d->clip->y0) y0 = d->clip->y0;
+        if (x1 > d->clip->x1) x1 = d->clip->x1;
+        if (y1 > d->clip->y1) y1 = d->clip->y1;
+    }
+    if (x0 >= x1 || y0 >= y1) return 1;
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) d->bmp->bits[(size_t)y * d->bmp->w + x] = px;
     return 1;
@@ -223,6 +250,7 @@ BOOL TextOutA(HDC hdc, int x, int y, LPCSTR s, int n) {
                 for (int xx = 0; xx < gw; xx++) {
                     const int px = ox + xx;
                     if (px < 0 || px >= d->bmp->w) continue;
+                    if (!clipped(d, px, py)) continue;
                     unsigned a = g[yy * gw + xx];
                     if (!aa) a = a >= 128 ? 255 : 0;
                     if (!a) continue;

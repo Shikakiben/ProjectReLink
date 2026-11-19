@@ -47,7 +47,7 @@ typedef short SHORT;
 typedef unsigned short USHORT;
 typedef char CHAR;
 typedef wchar_t WCHAR;
-typedef void *HANDLE, *HMODULE, *HINSTANCE, *HWND, *HDC, *HGDIOBJ, *HBITMAP, *HFONT, *HBRUSH, *HICON, *HCURSOR, *HKEY;
+typedef void *HANDLE, *HMODULE, *HINSTANCE, *HWND, *HDC, *HGDIOBJ, *HBITMAP, *HFONT, *HBRUSH, *HRGN, *HICON, *HCURSOR, *HKEY;
 typedef void *PVOID, *LPVOID;
 typedef const void *LPCVOID;
 typedef char *LPSTR;
@@ -605,6 +605,9 @@ HFONT CreateFontA(int height, int width, int escapement, int orientation, int we
                   LPCSTR face);
 HBRUSH CreateSolidBrush(COLORREF c);
 int FillRect(HDC dc, const RECT *r, HBRUSH b);
+/* (relink) the Insert menu clips its lists to the body's box: a rectangle region, and NULL to take the clip off */
+HRGN CreateRectRgn(int x1, int y1, int x2, int y2);
+int SelectClipRgn(HDC dc, HRGN rgn);
 int SetBkMode(HDC dc, int mode);
 COLORREF SetTextColor(HDC dc, COLORREF c);
 UINT SetTextAlign(HDC dc, UINT align);
