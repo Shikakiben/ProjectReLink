@@ -83,6 +83,18 @@ static void process_priority(void) {
                                              repeats 0.51 and 0.36 a second against 0.65 and 0.55) */
     const DWORD cls = level >= 2 ? HIGH_PRIORITY_CLASS : level == 1 ? ABOVE_NORMAL_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS;
     if (level > 0 && SetPriorityClass(GetCurrentProcess(), cls)) hos_log("process priority class: %s", level >= 2 ? "high" : "above normal");
+    /* (relink, HOS_GPU_PRIORITY=<n>, experiment; unset or 0: left alone) the process's class in the GPU's own scheduler, which
+       is apart from the CPU's: 1 above normal, 2 high (never realtime: it needs a privilege and can starve the desktop). The
+       game's GPU work then goes before the desktop's and other windows' when both wait for the card */
+    const char *g = getenv("HOS_GPU_PRIORITY");
+    const int glevel = g ? atoi(g) : 0;
+    if (glevel > 0) {
+        HMODULE gdi = LoadLibraryA("gdi32.dll");
+        typedef LONG (WINAPI *SetClass)(HANDLE, int);
+        SetClass set = gdi ? (SetClass)(void *)GetProcAddress(gdi, "D3DKMTSetProcessSchedulingPriorityClass") : NULL;
+        const LONG st = set ? set(GetCurrentProcess(), glevel >= 2 ? 4 : 3) : -1;   /* (the classes: 2 normal, 3 above, 4 high) */
+        hos_log("GPU scheduling class: %s (%s)", glevel >= 2 ? "high" : "above normal", st == 0 ? "set" : "refused");
+    }
 }
 #endif
 

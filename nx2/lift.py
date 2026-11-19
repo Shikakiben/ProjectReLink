@@ -209,6 +209,13 @@ def main():
         oot_fov.install(L, img)
         import oot_step_rate   # (relink, issues 16 and 67) the time step follows the real frame rate above 60 fps too
         oot_step_rate.install(L, img)
+        # (relink) A64_LOCAL_REGS: the functions the text patches look for after the lift (oot_patches.py and
+        # oot_native_resolution.py name them; their patterns spell the guest's registers as the context's) keep their
+        # registers in the context. Without this four of those patches found nothing (build fp_v3loc, 2026-11-18)
+        import re as re_
+        for patches in ("oot_patches.py", "oot_native_resolution.py"):
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), patches), encoding="utf-8") as f:
+                L.no_local |= {int(x, 16) for x in re_.findall(r"\bf_([0-9a-f]{8})\b", f.read())}
     # (the discovery walks every entry: counting the walks reports it without editing the vendored kit, which this
     #  project wraps rather than patches — see third_party/a64-kit/PROVENANCE.md)
     entries = max(1, len(img.entries))

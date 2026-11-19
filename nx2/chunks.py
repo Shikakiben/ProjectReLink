@@ -378,12 +378,19 @@ def write_costs(gen_dir, costs):
         f.write("".join("%s %d\n" % kv for kv in sorted(known.items())))
 
 
+# (relink, 17/11) What one compiled file holds: about 8 MB of cost, not a whole 24 MB chunk. A compiler's peak memory follows its
+# file's size (~59 MB per MB of C: one 24 MB chunk 1411 MB, the same chunk in three parts 434 to 527 MB each) and the CPU time does
+# not (46 s whole, 47 s in three parts, objects within 0.3 % of each other's size): a 16 GB PC ran 4 to 5 compilers at once on 12
+# threads, the memory as the limit. The hot pieces (nx2/split_hot.py) are not cut: their callees inline within them
+PART_BYTES = 8 << 20
+
+
 def split_big(gen_dir, files, budget=None):
-    """Chunks whose estimated compile time (fn_cost) is well past a plain chunk's, cut at function starts into parts of about equal
-    cost: code_NNN.c, code_NNN_1.c ... A chunk of the giant functions took 350 s, alone at the end of the build, where a chunk of
-    ordinary functions takes 45; the boundaries kept in chunks.txt also let chunks grow (44 MB beside 25). The first part keeps the
+    """Chunks whose estimated compile time (fn_cost) is well past a part's (PART_BYTES), cut at function starts into parts of about
+    equal cost: code_NNN.c, code_NNN_1.c ... A chunk of the giant functions took 350 s, alone at the end of the build, where a chunk
+    of ordinary functions takes 45; the boundaries kept in chunks.txt also let chunks grow (44 MB beside 25). The first part keeps the
     name, so seed_from_gen and the boundaries are as before. Writes chunk_costs.txt for every chunk; returns the new parts' paths"""
-    budget = budget or a64_lift.CHUNK_BYTES
+    budget = budget or PART_BYTES
     made, costs = [], {}
     for path in files:
         m = re.fullmatch(r"code_(\d{3})\.c", os.path.basename(path))

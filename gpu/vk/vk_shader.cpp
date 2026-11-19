@@ -990,8 +990,11 @@ uint64_t disk_stamp() {
         add(mma_order_b.data(), sizeof(uint32_t) * mma_order_b.size());
         add(mma_order_c.data(), sizeof(uint32_t) * mma_order_c.size());
     }
+    // (relink) "RX_VK_GP_" (RX_VK_GP_TEST), not "RX_VK_GP": that also took RX_VK_GPU_DUMP, RX_VK_GPU_UNSWIZZLE, RX_VK_GPU_PAGES,
+    // RX_VK_GPU_PROFILE and RX_VK_GPL, none of which the translation reads, and a line of them added to relink_env.txt or taken out
+    // prepared every shader again
     for (char** e = _environ; e && *e; e++)
-        for (const char* pre : {"RX_VK_OOT", "RX_VK_MMA", "RX_VK_NATIVE", "RX_VK_NAN", "RX_VK_TASK_CAP", "RX_VK_NETWORK", "RX_VK_GP", "RX_VK_FOLLOW", "RX_VK_NO_FOLLOW", "RX_VK_NO_F16", "RX_VK_SHARED", "RX_VK_MESH", "RX_VK_NO_INVARIANT", "RX_VK_NO_NAN_GUARD", "RX_VK_MARKERS", "EDEN_"})
+        for (const char* pre : {"RX_VK_OOT", "RX_VK_MMA", "RX_VK_NATIVE", "RX_VK_NAN", "RX_VK_TASK_CAP", "RX_VK_NETWORK", "RX_VK_GP_", "RX_VK_FOLLOW", "RX_VK_NO_FOLLOW", "RX_VK_NO_F16", "RX_VK_SHARED", "RX_VK_MESH", "RX_VK_NO_INVARIANT", "RX_VK_NO_NAN_GUARD", "RX_VK_MARKERS", "EDEN_"})
             if (!strncmp(*e, pre, strlen(pre))) add(*e, strlen(*e));
     return h;
 }
@@ -1715,6 +1718,7 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
         mrt.mesh_fallback = fallback;
         mrt.mesh_fallback_capacity = Shader::Backend::SPIRV::MESH_FALLBACK_CAPACITY;
         mrt.mesh_fallback_task = task_t != nullptr;
+        if (fallback && task_t) mrt.mesh_fallback_task_threads = task_t->program.workgroup_size[0];   // (issue 640: the mesh's own index)
         const std::vector<uint32_t> mspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), mrt, mesh_t->program, bindings);
         kept.push_back(mspirv);
         Stage ms;

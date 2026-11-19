@@ -4404,6 +4404,7 @@ int defrag_mb() {   // (ON by default since hs199/hs200: the same route back to 
 }
 uint64_t made_last_frame = 0;   // (textures made in the last present's frame: a scene change under way, no pass then)
 constexpr uint64_t kDefragBusy = 16;
+constexpr int64_t kDefragStallNs = 50000000;
 void defrag_finish() {
     uint64_t moved = 0, freed = 0, bb = 0, ab = 0;
     uint32_t moves = 0, blocks_freed = 0, blocks = 0;
@@ -4417,7 +4418,13 @@ void defrag_finish() {
              blocks_freed, (unsigned long long)(freed >> 20), blocks, (unsigned long long)((bb - std::min(bb, ab)) >> 20),
              defrag_start_blocks, (long long)(defrag_start_free >> 20), defrag_ns / 1e6, defrag_max_ns / 1e6);
     defrag_running = false;
-    defrag_next_frame = frame_no + 120;
+    // (issue 136) a step of 50 ms or more ended this defragmentation at once (defrag_frame), and the next one waits four times
+    // longer each time that happens again, up to hours: whatever the driver is slow at there, it is not paid in a row
+    static uint32_t stalls = 0;
+    stalls = defrag_max_ns >= kDefragStallNs ? std::min<uint32_t>(stalls + 1, 6) : 0;
+    if (stalls) logf("vk: the defragmentation stopped after a step of %.0f ms: the next one in %llu frames at the soonest",
+                     defrag_max_ns / 1e6, (unsigned long long)(120ull << (2 * stalls)));
+    defrag_next_frame = frame_no + (120ull << (2 * stalls));
     defrag_slow = defrag_max_ns > 6000000;
 }
 void texture_defrag_step() {
@@ -4442,7 +4449,7 @@ void texture_defrag_step() {
         defrag_start_free = (int64_t)(bb - ab), defrag_start_blocks = blocks;
     }
     if (frame_no == defrag_pass_frame) return;   // (a pass a present at most)
-    if (!image_defrag_pass(defrag_moves)) {
+    if (defrag_max_ns >= kDefragStallNs || !image_defrag_pass(defrag_moves)) {   // (a stalled step: no further pass, issue 136)
         defrag_finish();
         return;
     }
@@ -4569,7 +4576,7 @@ void defrag_frame(uint64_t completed) {
     static int logged;
     if (defrag_log() && logged++ < 2000)
         logf("vk: defrag pass ended at frame %llu: %.2f ms (%zu old images to destroy)", (unsigned long long)frame_no, ns / 1e6, olds);
-    if (!more || defrag_passes >= 256) defrag_finish();
+    if (!more || defrag_passes >= 256 || ns >= kDefragStallNs) defrag_finish();
 }
 
 void defrag_frame(uint64_t completed);

@@ -26,7 +26,6 @@
 #include "vk_fsr.h"
 #include "vk_reflex.h"
 #include "vk_progress.h"
-#include "vk_push_fix.h"
 #ifdef _WIN32
 #include <dxgi1_6.h>   // (relink: HDR output, hdr_display)
 #endif
@@ -158,35 +157,6 @@ void guard_shader_modules() {
 #else
 void guard_shader_modules() {}
 #endif
-
-// (relink, issue 640) The mesh shader fallback's task programs read the task payloads' address from the push constants by the
-// member's byte offset (64) where SPIR-V takes the member's index (3): an access chain past the block's last member. Such a module
-// is invalid, and NVIDIA's compiler faulted on it (vkCreateComputePipelines, "a fault in the driver", 10 ms). A GTX 1060's and a
-// GTX 1070's logs ended there: their first task + mesh draw (a5da9f84b72d1471, Kokiri Forest after a save is loaded) "could not be
-// made", the next fallback compile never returned, and the picture stayed black with the game running behind it. Measured with
-// RX_VK_FORCE_MESH_FALLBACK=1 on an RTX 3060 Ti: the same fault on a5da9f84b72d1471, then the render thread's last line. The
-// translator makes them so, and the program caches players have keep them: here, as each module is made, such an index becomes
-// the index of the member at that offset (vk_push_fix.h). Only on a GPU that runs the fallback. RX_VK_NO_PUSH_FIX=1: the modules
-// as they are
-PFN_vkCreateShaderModule unfixed_create_shader_module = nullptr;
-std::atomic<int> push_fixes_told{0};
-VKAPI_ATTR VkResult VKAPI_CALL fixing_create_shader_module(VkDevice d, const VkShaderModuleCreateInfo* ci,
-                                                           const VkAllocationCallbacks* a, VkShaderModule* m) {
-    std::vector<uint32_t> w;
-    const size_t fixed = ci && ci->pCode && !(ci->codeSize % 4) ? push_offset_fix(ci->pCode, ci->codeSize / 4, w) : 0;
-    if (!fixed) return unfixed_create_shader_module(d, ci, a, m);
-    if (push_fixes_told++ < 4)
-        logf("vk: fallback: %zu push constant access%s by byte offset made by member index (issue 640)", fixed, fixed == 1 ? "" : "es");
-    VkShaderModuleCreateInfo with = *ci;
-    with.pCode = w.data();
-    with.codeSize = w.size() * 4;
-    return unfixed_create_shader_module(d, &with, a, m);
-}
-void fix_fallback_modules() {
-    if (!dev.mesh_fallback || getenv("RX_VK_NO_PUSH_FIX") || !vkx::vkCreateShaderModule) return;
-    unfixed_create_shader_module = vkx::vkCreateShaderModule;   // (the guard's, or the driver's)
-    vkx::vkCreateShaderModule = fixing_create_shader_module;
-}
 
 bool has_extension(const std::vector<VkExtensionProperties>& all, const char* name) {
     for (const auto& e : all)
@@ -680,7 +650,6 @@ bool create_device() {
 
     load_device(dev.device);
     guard_shader_modules();   // (relink, issue 43)
-    fix_fallback_modules();   // (relink, issue 640: after the guard, through it)
     vkGetDeviceQueue(dev.device, dev.queue_family, 0, &dev.queue);
     dev.present_queue = VK_NULL_HANDLE;
     dev.present_family = dev.queue_family;
@@ -787,7 +756,8 @@ bool create_swapchain(uint32_t width, uint32_t height) {
     VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
     // (as on a card or driver with vsync forced. relink: and the "30, smooth" frame rate, whose frames are each held for the
     // same number of refreshes by presenting them again: only FIFO shows every present, one a refresh)
-    const bool force_fifo = getenv("RX_VK_FIFO") != nullptr || (fps_low_cap() > 0 && !fifo_held_for_startup.load());
+    // (relink: and the Insert menu's V-Sync, for a card whose driver has no mailbox (AMD's on Windows): immediate tears)
+    const bool force_fifo = getenv("RX_VK_FIFO") != nullptr || opts.vsync != 0 || (fps_low_cap() > 0 && !fifo_held_for_startup.load());
     if (!force_fifo) {
         for (auto m : modes)
             if (m == VK_PRESENT_MODE_MAILBOX_KHR) mode = m;
@@ -1078,6 +1048,8 @@ void prepare_with_screen() {
         int eta_stage = -1;
         double next_log = 10;
         bool prepared = false;   // (this start prepares the programs: a first start after an update, two steps)
+        double finished_at = -1;   // (when the work ended: the staff's ending is played for kStartupOutro seconds after it)
+        bool staff_shown = false;   // (the screen showed the staff open: a start that lasted past its first second)
         uint32_t last_w = dev.swap_extent.width, last_h = dev.swap_extent.height;
         for (;;) {
             const bool finished = prep_finished.load(std::memory_order_acquire);
@@ -1096,7 +1068,12 @@ void prepare_with_screen() {
             StartupState st;
             st.stage = stage, st.done = done, st.total = total, st.left = left, st.secs = secs;
             st.prepared = prepared, st.finished = finished, st.stopping = prepare_stopped();
-            const StartupView view = startup_view(st);
+            if (finished && finished_at < 0) finished_at = secs;
+            if (!finished && secs >= 1.0) staff_shown = true;
+            st.staff_shown = staff_shown;
+            st.since_finished = finished ? secs - finished_at : -1;
+            StartupView view = startup_view(st);
+            view.gpu = dev.props.deviceName;
             startup_screen(&view);
             uint32_t w, h;
             window_size(&w, &h);
@@ -1105,8 +1082,16 @@ void prepare_with_screen() {
                 last_w = w, last_h = h;
             }
             if (w && h) present_image(nullptr, dev.swap_extent.width, dev.swap_extent.height, nullptr);
-            if (finished || paint_stop.load()) break;
-            Sleep(33);
+            // (the staff's ending, played in full before the game takes the window, however early the work ended; a stop
+            // asked by closing does not wait. Drawn at about 60 frames a second meanwhile: it is a moving picture)
+            const bool closing = finished && staff_shown && !st.stopping && secs - finished_at < kStartupOutro;
+            if ((finished || paint_stop.load()) && !closing) break;
+            if (!finished) Sleep(33);
+            else {   // (the ending: a frame every sixtieth of a second, counted from its start, whatever the present waited)
+                const double next = finished_at + (std::floor((secs - finished_at) * 60) + 1) / 60.0;
+                const double now = std::chrono::duration<double>(clock::now() - t0).count();
+                if (next > now) Sleep((DWORD)std::max(1.0, (next - now) * 1000));
+            }
         }
         SetEvent(painted);
     });
@@ -1123,7 +1108,7 @@ void prepare_with_screen() {
     }
     worker.join();
     paint_stop.store(true);
-    if (WaitForSingleObject(painted, 1000) == WAIT_OBJECT_0) painter.join();
+    if (WaitForSingleObject(painted, 1000 + (DWORD)(kStartupOutro * 1000)) == WAIT_OBJECT_0) painter.join();
     else {   // (its present waits for the window to be seen: the game's own presents will, too)
         logf("vk: start-up: the window is not being shown; the game starts without waiting for it");
         painter.detach();
