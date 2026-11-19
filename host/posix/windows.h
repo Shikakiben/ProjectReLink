@@ -576,6 +576,11 @@ int MessageBoxA(HWND w, LPCSTR text, LPCSTR caption, UINT type);
 #define FW_MEDIUM 500
 #define FW_SEMIBOLD 600
 #define FW_BOLD 700
+#define FW_HEAVY 900
+/* (relink) the colours of a COLORREF, as Windows' own macros: 0x00BBGGRR */
+#define GetRValue(c) ((BYTE)((c) & 0xFF))
+#define GetGValue(c) ((BYTE)(((c) >> 8) & 0xFF))
+#define GetBValue(c) ((BYTE)(((c) >> 16) & 0xFF))
 #define DEFAULT_CHARSET 1
 #define OUT_DEFAULT_PRECIS 0
 #define CLIP_DEFAULT_PRECIS 0
