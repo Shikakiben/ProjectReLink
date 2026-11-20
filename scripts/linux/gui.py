@@ -1221,6 +1221,13 @@ class Window(QWidget):
                                  "Frames made in between: smoother to the eye, not more responsive."))
         self.opt_pacing = Tick("", False)
         s5.addWidget(setting_row("Even pacing of generated frames", self.opt_pacing, "With frame generation only."))
+        # (RX_VK_FAST_SYNC, gpu/vk/vk_internal.h: on for every card since 0.7.9.2, which makes the
+        #  ground and the grass flicker on some GPUs. The game has no row for it; the environment
+        #  variable is the only switch, so Play passes it.)
+        self.opt_fastsync = Tick("", True)
+        s5.addWidget(setting_row("Fast sync", self.opt_fastsync,
+                                 "Turn it off if the ground or the grass flickers: it is on for every "
+                                 "card since 0.7.9.2, and the next release turns it off again."))
 
         s5.addWidget(hairline())
         s5.addWidget(label("GAME", 10, T.W_SEMIBOLD, Staff.BONE_FAINT))
@@ -1274,7 +1281,7 @@ class Window(QWidget):
         s4.addLayout(links4)
         self.pages.addWidget(home)
 
-        for tick in (self.opt_fullscreen, self.opt_fps, self.opt_ultrawide, self.opt_pacing,
+        for tick in (self.opt_fullscreen, self.opt_fps, self.opt_ultrawide, self.opt_pacing, self.opt_fastsync,
                      self.opt_handheld, self.opt_audio, self.opt_invert):
             tick.clicked.connect(self.save_home_options)
         for choice in (self.opt_resolution, self.opt_upscaler, self.opt_filter, self.opt_framerate,
@@ -1630,6 +1637,8 @@ class Window(QWidget):
         saved = read_launcher()
         if saved.get("audio", 1) == 0:
             env["HOS_AUDIO"] = "0"
+        if saved.get("fast_sync", 1) == 0:
+            env["RX_VK_FAST_SYNC"] = "0"
         rate = saved.get("frame_rate", 0)
         if rate == 1:
             env["HOS_FPS_UNLOCKED"] = "1"
@@ -1891,6 +1900,7 @@ class Window(QWidget):
             self.opt_pacing.setChecked(num("frame_pacing", 0) != 0)
             self.opt_invert.setChecked(num("invert_mouse_vertical", 0) != 0)
             self.opt_audio.setChecked(saved.get("audio", 1) != 0)
+            self.opt_fastsync.setChecked(saved.get("fast_sync", 1) != 0)
             self.opt_sharpness.set_value(num("sharpness", 50))
             self.opt_sharpness_text.setText("%d %%" % self.opt_sharpness.value)
             for choice, key, otherwise in ((self.opt_resolution, "resolution", 1),
@@ -1967,6 +1977,7 @@ class Window(QWidget):
         saved = read_launcher()   # (the two the game has no row for: kept beside it, passed to the game at its start)
         saved["frame_rate"] = self.opt_framerate.currentData()
         saved["audio"] = 1 if self.opt_audio.isChecked() else 0
+        saved["fast_sync"] = 1 if self.opt_fastsync.isChecked() else 0
         write_launcher(saved)
 
     # ---- when something goes wrong (launcher/Install.cs: ShowProblem) ----
